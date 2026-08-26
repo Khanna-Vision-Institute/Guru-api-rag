@@ -1,0 +1,310 @@
+[
+  {
+    "question": "What is the office phone number?",
+    "answer": "Our office phone numbers are (310) 482-1240 or (805) 230-2126",
+    "keywords": [
+      "phone",
+      "number",
+      "call",
+      "contact"
+    ]
+  },
+  {
+    "question": "What insurances do you take?",
+    "answer": "Anthem Blue Cross PPO, Aetna PPO, Blue Shield Blue Cross PPO, Medicare, United Health Care PPO, Cigna PPO, Humana PPO",
+    "keywords": [
+      "insurance",
+      "coverage",
+      "accept",
+      "take"
+    ]
+  },
+  {
+    "question": "If I am hyperopic, what are my surgery options?",
+    "answer": "Depending on your prescription, you may be a good candidate for LASIK or EVO ICL. Feel free to set up a consultation so we can give you accurate information on what you may be best suited for.",
+    "keywords": [
+      "hyperopic",
+      "farsighted",
+      "surgery",
+      "options"
+    ]
+  },
+  {
+    "question": "Do you take walk-ins?",
+    "answer": "It is best to schedule an appointment with us so we can expect you and understand what you are coming in for.",
+    "keywords": [
+      "walk-in",
+      "walkin",
+      "appointment",
+      "schedule"
+    ]
+  },
+  {
+    "question": "How early should I arrive for my appointment?",
+    "answer": "You can plan to arrive about 5 minutes before your appointment in case you may need to fill out any paperwork or give new insurance information.",
+    "keywords": [
+      "arrive",
+      "early",
+      "time",
+      "appointment"
+    ]
+  },
+  {
+    "question": "How much is a new patient exam without insurance?",
+    "answer": "A new patient exam without insurance would be $395.",
+    "keywords": [
+      "cost",
+      "price",
+      "exam",
+      "new patient",
+      "insurance"
+    ]
+  },
+  {
+    "question": "Do you take FSA or HSA as payment?",
+    "answer": "Yes! HSA and FSA accounts are accepted for qualifying procedures and services in our office.",
+    "keywords": [
+      "FSA",
+      "HSA",
+      "payment",
+      "flexible spending"
+    ]
+  },
+  {
+    "question": "Do I need a referral to be seen?",
+    "answer": "No referral is required! You can call our office anytime to schedule an appointment.",
+    "keywords": [
+      "referral",
+      "required",
+      "appointment"
+    ]
+  },
+  {
+    "question": "How soon can I make an appointment?",
+    "answer": "We strive to see patients as soon as possible and often have availability within the same week or the following week. Please call our office so we can review current openings and schedule your visit.",
+    "keywords": [
+      "appointment",
+      "soon",
+      "availability",
+      "schedule"
+    ]
+  },
+  {
+    "question": "What do I need to bring with me to my appointment?",
+    "answer": "If you plan to use insurance, please bring your insurance card. You may also bring medical records if you have any from other doctor's offices. We don't need anything else!",
+    "keywords": [
+      "bring",
+      "appointment",
+      "insurance card",
+      "records"
+    ]
+  },
+  {
+    "question": "How can I cancel or reschedule my appointment?",
+    "answer": "You can cancel your appointment through me! Just say you'd like to cancel and I'll collect your name, age, procedure, and email to process it. For rescheduling, please call our office at (310) 482-1240 or (805) 230-2126.",
+    "keywords": [
+      "cancel",
+      "reschedule",
+      "change",
+      "appointment"
+    ]
+  },
+  {
+    "question": "Do you offer same day emergency visits?",
+    "answer": "Please give our office a call to see how we can help you and schedule you accordingly.",
+    "keywords": [
+      "emergency",
+      "same day",
+      "urgent",
+      "visit"
+    ]
+  },
+  {
+    "question": "How long do exams typically take?",
+    "answer": "New patient exams or consultations typically last about 30 minutes. Time may be dependent on questions being asked during the appointment.",
+    "keywords": [
+      "duration",
+      "how long",
+      "exam",
+      "time"
+    ]
+  },
+  {
+    "question": "What is cataract surgery and how long does it take?",
+    "answer": "Cataract surgery is a common outpatient procedure that removes the clouded natural lens of the eye and replaces it with an artificial lens. The procedure itself typically takes about 10\u201315 minutes per eye, and most patients go home to rest the same day.",
+    "keywords": [
+      "cataract",
+      "surgery",
+      "duration",
+      "procedure"
+    ]
+  },
+  {
+    "question": "Can I drive myself home after surgery?",
+    "answer": "No, you will need someone to drive you home after surgery. For safety reasons, patients are not able to drive themselves the day of the procedure.",
+    "keywords": [
+      "drive",
+      "driving",
+      "after surgery",
+      "transportation"
+    ]
+  },
+  {
+    "question": "What should I expect during my 1 day post op?",
+    "answer": "Your follow-up appointment allows us to monitor healing, check your vision, and ensure there are no complications. Our staff will review your progress and answer any questions you may have.",
+    "keywords": [
+      "post op",
+      "follow-up",
+      "after surgery",
+      "recovery"
+    ]
+  },
+  {
+    "question": "What symptoms are normal after surgery?",
+    "answer": "It's normal to have temporary blurry vision, light sensitivity, mild irritation, watering, or redness after surgery. These symptoms are expected and usually get better over the first few days.",
+    "keywords": [
+      "symptoms",
+      "normal",
+      "after surgery",
+      "side effects"
+    ]
+  },
+  {
+    "question": "Do I need to dilate my eyes during my exam?",
+    "answer": "It is recommended to get your eyes dilated at least once a year to monitor eye health. If you are unable to be dilated during your visit, we can schedule you for a dilated exam at a later time.",
+    "keywords": [
+      "dilate",
+      "dilation",
+      "exam",
+      "eyes"
+    ]
+  },
+  {
+    "question": "How can I get a copy of my prescription?",
+    "answer": "You can give our office a call and we will be more than happy to provide you a copy of your prescription.",
+    "keywords": [
+      "prescription",
+      "copy",
+      "glasses",
+      "contacts"
+    ]
+  },
+  {
+    "question": "What is your fax number?",
+    "answer": "Our fax number is (805) 230-2199.",
+    "keywords": [
+      "fax",
+      "number"
+    ]
+  },
+  {
+    "question": "Is there parking at your office?",
+    "answer": "We have free parking at our Westlake Village office and validate parking in the parking structure at our Beverly Hills office.",
+    "keywords": [
+      "parking",
+      "park",
+      "location"
+    ]
+  },
+  {
+    "question": "Do you do virtual consultations?",
+    "answer": "Yes! You can either set up a virtual consultation with us through our website, or by giving our office a call.",
+    "keywords": [
+      "virtual",
+      "online",
+      "consultation",
+      "telemedicine"
+    ]
+  },
+  {
+    "question": "How can I verify if you are an in network provider?",
+    "answer": "You can verify if we are an in network provider by calling your insurance or viewing through your insurance portal.",
+    "keywords": [
+      "in network",
+      "provider",
+      "insurance",
+      "verify"
+    ]
+  },
+  {
+    "question": "Do you accept Medi-Cal?",
+    "answer": "No, we currently do not accept Medi-Cal insurance.",
+    "keywords": [
+      "Medi-Cal",
+      "MediCal",
+      "medicaid",
+      "insurance"
+    ]
+  },
+  {
+    "question": "Do you accept Vision Insurance?",
+    "answer": "Yes! We accept VSP and Eyemed vision insurance for glasses and contact lens exams. Please call our office to verify your eligibility.",
+    "keywords": [
+      "vision insurance",
+      "VSP",
+      "Eyemed",
+      "glasses",
+      "contacts"
+    ]
+  },
+  {
+    "question": "How can I pay my bill?",
+    "answer": "You can either send your statement with a check or credit card number, or call our office and we would be more than happy to take your payment.",
+    "keywords": [
+      "pay",
+      "payment",
+      "bill",
+      "balance"
+    ]
+  },
+  {
+    "question": "What financing companies do you use?",
+    "answer": "We currently use Alphaeon or Care Credit for financing. You can give us a call or check our website on how to sign up on either financing platforms.",
+    "keywords": [
+      "financing",
+      "payment plan",
+      "Alphaeon",
+      "CareCredit"
+    ]
+  },
+  {
+    "question": "How can I confirm my appointment?",
+    "answer": "You can send us a text message or give us a call to confirm your appointment.",
+    "keywords": [
+      "confirm",
+      "confirmation",
+      "appointment"
+    ]
+  },
+  {
+    "question": "Can I make an appointment for my 5 year old daughter?",
+    "answer": "The youngest age we see is 13 years old.",
+    "keywords": [
+      "age",
+      "children",
+      "kids",
+      "young",
+      "minimum"
+    ]
+  },
+  {
+    "question": "How long will my eyes be dilated for after a dilated exam?",
+    "answer": "Dilation typically lasts about 4-6 hours.",
+    "keywords": [
+      "dilated",
+      "dilation",
+      "how long",
+      "duration"
+    ]
+  },
+  {
+    "question": "Can I be given a doctor's note during my visit?",
+    "answer": "Yes! We would be more than happy to write you a doctor's note for your visit with us. Just ask during your appointment.",
+    "keywords": [
+      "doctor note",
+      "medical note",
+      "excuse",
+      "work note"
+    ]
+  }
+]

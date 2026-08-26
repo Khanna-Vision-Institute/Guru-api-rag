@@ -1,0 +1,17 @@
+{
+  "name": "guru-ai-vapi-setup",
+  "version": "1.0.0",
+  "description": "Vapi integration setup for Guru AI",
+  "main": "vapi_setup.js",
+  "scripts": {
+    "setup": "node vapi_setup.js",
+    "test": "node -e \"console.log('Testing Vapi setup...')\""
+  },
+  "dependencies": {
+    "axios": "^1.13.2",
+    "dotenv": "^16.6.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

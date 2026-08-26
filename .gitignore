@@ -1,0 +1,35 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+.eggs/
+
+# Node
+node_modules/
+
+# Logs & runtime
+*.log
+guru_logs.json
+
+# Backups
+backups/
+*.backup*
+*.bak*
+
+# Large/generated data (re-ingest if needed)
+awscliv2.zip
+knn.json
+
+# AWS CLI dist (install separately on server)
+aws/
+
+# OS
+.DS_Store

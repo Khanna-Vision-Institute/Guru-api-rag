@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Khanna Institute - Example Page with Guru AI Chat</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+        }
+
+        header {
+            background: linear-gradient(135deg, #4f46e5, #7c3aed);
+            color: white;
+            padding: 2rem 0;
+            text-align: center;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
+
+        main {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .hero {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        .hero h2 {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            color: #4f46e5;
+        }
+
+        .hero p {
+            font-size: 1.1rem;
+            color: #666;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-bottom: 3rem;
+        }
+
+        .feature-card {
+            background: white;
+            border-radius: 12px;
+            padding: 2rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            border: 1px solid #e5e7eb;
+        }
+
+        .feature-card h3 {
+            color: #4f46e5;
+            margin-bottom: 1rem;
+            font-size: 1.5rem;
+        }
+
+        .feature-card p {
+            color: #666;
+            line-height: 1.6;
+        }
+
+        .cta {
+            text-align: center;
+            background: linear-gradient(135deg, #f8fafc, #e2e8f0);
+            padding: 3rem 2rem;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+        }
+
+        .cta h2 {
+            color: #4f46e5;
+            margin-bottom: 1rem;
+        }
+
+        .cta p {
+            color: #666;
+            margin-bottom: 2rem;
+            max-width: 500px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .btn {
+            display: inline-block;
+            background: linear-gradient(135deg, #4f46e5, #7c3aed);
+            color: white;
+            padding: 1rem 2rem;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(79, 70, 229, 0.3);
+        }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            background: #f8fafc;
+            color: #666;
+        }
+
+        .chat-instructions {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 2rem 0;
+            text-align: center;
+        }
+
+        .chat-instructions strong {
+            color: #856404;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🏥 Khanna Institute</h1>
+        <p>Premium Vision Correction & LASIK Surgery</p>
+    </header>
+
+    <main>
+        <div class="chat-instructions">
+            <strong>💬 Try Guru AI Chat!</strong> Click the chat bubble in the bottom-right corner to ask questions about LASIK surgery and vision correction procedures.
+        </div>
+
+        <section class="hero">
+            <h2>Advanced Vision Correction Technology</h2>
+            <p>Experience the future of vision correction with our state-of-the-art procedures, including LASIK, SMILE, and advanced lens implants. Our board-certified ophthalmologists use cutting-edge ZEISS technology for unparalleled precision and safety.</p>
+        </section>
+
+        <section class="features">
+            <div class="feature-card">
+                <h3>✨ LASIK Surgery</h3>
+                <p>All-laser, bladeless vision correction procedure with decades of proven results. The gold standard for improving eyesight and reducing dependence on glasses or contact lenses.</p>
+            </div>
+
+            <div class="feature-card">
+                <h3>⚡ SMILE Laser</h3>
+                <p>The modern choice for Gen Z and active individuals. Flap-free, painless procedure with incredibly fast recovery. Perfect for athletes and those with active lifestyles.</p>
+            </div>
+
+            <div class="feature-card">
+                <h3>👁️ EVO ICL</h3>
+                <p>Reversible implantable lens ideal for high prescriptions or thin corneas. Fully reversible with built-in UV protection for crystal-clear vision.</p>
+            </div>
+
+            <div class="feature-card">
+                <h3>📖 Presbyopic Implants (PIE)</h3>
+                <p>Freedom after 40 - eliminate reading glasses permanently. Clear vision at all distances with no future cataracts. One procedure, lifetime results.</p>
+            </div>
+        </section>
+
+        <section class="cta">
+            <h2>Ready to See Clearly?</h2>
+            <p>Take our 60-second vision quiz to determine if you're a candidate for vision correction, or schedule a free consultation with our expert team.</p>
+            <a href="#" class="btn">Take Vision Quiz</a>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2025 Khanna Vision Institute. Your vision is our mission.</p>
+    </footer>
+
+    <!-- Guru AI Chat Widget -->
+    <script src="guru-chat-embed.js"></script>
+</body>
+</html>

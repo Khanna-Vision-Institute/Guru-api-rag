@@ -1,0 +1,29 @@
+# Guru AI RAG System Environment Variables
+# Copy this file to .env and fill in your actual values
+
+# OpenAI Configuration
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_CHAT_MODEL=gpt-4o-mini
+
+# Google Gemini Configuration
+GOOGLE_API_KEY=your_google_api_key_here
+GEMINI_MODEL=gemini-2.0-flash-exp
+
+# Anthropic Claude Configuration
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+CLAUDE_MODEL=claude-3-5-sonnet-latest
+
+# AWS OpenSearch Configuration
+OPENSEARCH_ENDPOINT=vpc-guru-rag-w7f4dc2djtwacgeelhfpd7u7li.us-east-1.es.amazonaws.com
+OPENSEARCH_INDEX=guru-rag
+AWS_REGION=us-east-1
+
+# Embedding Configuration
+EMBED_MODEL=text-embedding-3-large
+EMBED_DIM=3072
+
+# Application Configuration
+DEFAULT_MODEL=openai
+
+# Logging
+LOG_FILE=guru_logs.json
