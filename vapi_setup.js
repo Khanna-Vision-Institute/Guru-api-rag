@@ -35,7 +35,7 @@ const ASSISTANT_CONFIG = {
     },
     firstMessage: "Hi! I'm Guru, your AI vision assistant. I can help answer questions about LASIK, EVO ICL, SMILE laser, cataract surgery, and all Khanna Institute vision correction procedures. How can I assist you today?",
     serverUrl: WEBHOOK_URL_HTTPS,
-    serverUrlSecret: process.env.WEBHOOK_SECRET || "guru-webhook-secret-2025"
+    serverUrlSecret: process.env.WEBHOOK_SECRET
 };
 
 async function createAssistant() {
