@@ -1,0 +1,30 @@
+{
+  "name": "KVI approved education",
+  "firstMessage": "Welcome to Khanna Vision Institute. I can share general information approved by our clinical team. Please avoid sharing personal medical details.",
+  "model": {
+    "provider": "custom-llm",
+    "url": "https://khannainstitute.com/api/guru/vapi/lacs-public",
+    "model": "kvi-lacs-public",
+    "metadataSendMode": "off",
+    "temperature": 0,
+    "numFastTurns": 0,
+    "timeoutSeconds": 15,
+    "maxTokens": 2000,
+    "messages": [],
+    "tools": [],
+    "toolIds": []
+  },
+  "voice": {
+    "provider": "vapi",
+    "voiceId": "Kai"
+  },
+  "artifactPlan": {
+    "recordingEnabled": false,
+    "videoRecordingEnabled": false,
+    "loggingEnabled": false,
+    "pcapEnabled": false,
+    "transcriptPlan": {
+      "enabled": false
+    }
+  }
+}

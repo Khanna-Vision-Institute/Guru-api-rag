@@ -157,7 +157,7 @@ class VoicePreviewTests(unittest.IsolatedAsyncioTestCase):
         value = json.loads(self.body(sent))
         self.assertEqual(value["protocol"], "lacs-voice-staff-preview-v1")
         self.assertEqual(set(value), {"protocol", "consumerEnabled", "deliveryMode", "sourceSha256"})
-        self.assertEqual(len(value["sourceSha256"]), 4)
+        self.assertEqual(len(value["sourceSha256"]), 5)
         self.assertTrue(all(len(v) == 64 for v in value["sourceSha256"].values()))
         self.assertNotIn(KEY.encode(), self.body(sent))
         self.assertEqual((await self.invoke(method="GET", path="/vapi/lacs-preview/status", headers=[]))[0]["status"], 401)

@@ -37,3 +37,10 @@ LACS_ORIGIN=https://staging.khannainstitute.com
 LACS_TOKEN_URL=https://auth.staging.khannainstitute.com/realms/kvi-staging/protocol/openid-connect/token
 LACS_CLIENT_ID=kvi-lacs-staging-guru-consumer
 LACS_CLIENT_SECRET=
+
+# Approved public education (operator cutover after LACS public-resolve deployment)
+# Set LACS_CONSUMER_DELIVERY=approved-public to activate exact approved wording.
+# Keep approved-public and set LACS_CONSUMER_ENABLED=false for handoff-only rollback.
+LACS_VOICE_PUBLIC_ENABLED=false
+LACS_VOICE_PUBLIC_KEY=
+

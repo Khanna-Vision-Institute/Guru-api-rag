@@ -5,7 +5,8 @@ Errors, ambiguous matches and failed fresh resolution are BLOCKED, never NO_MATC
 Public SHADOW calls intentionally retain the existing Guru answer path, even when
 the observed outcome is BLOCKED; this is a test mode, not live clinical fallback.
 
-Live delivery is deliberately unavailable until retirement-aware coverage is deployed and verified, the legacy corpus is reconciled, and patient delivery is authorized.
+The explicitly selected approved-public lane requires the separate fresh public
+resolution contract. Every miss or failure hands off; no legacy fallback is allowed.
 Server configuration comes from the deployment's protected environment.
 """
 import asyncio
@@ -21,7 +22,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from lacs_approved_qa import ApprovedQaClient, Unavailable, _NoRedirect
+from lacs_approved_qa import ApprovedQaClient, Unavailable, _NoRedirect, PUBLIC_SCHEMA, PUBLIC_POLICY
 
 log = logging.getLogger("lacs_consumer")
 if not log.handlers:
@@ -130,7 +131,13 @@ def blocked_decision():
     return Decision("BLOCKED", "verification_unavailable")
 
 
+def public_mode():
+    return DELIVERY == "approved-public"
+
+
 def _mode():
+    if public_mode():
+        return None if ENABLED else blocked_decision()
     if not ENABLED or DELIVERY == "off":
         return Decision("BYPASS", "disabled")
     if DELIVERY != "shadow":
@@ -140,8 +147,10 @@ def _mode():
 
 
 def _present(decision, channel, privileged):
-    safe_channel = channel if channel in ("ask", "chat", "webhook", "voice-preview") else "unknown"
+    safe_channel = channel if channel in ("ask", "chat", "webhook", "voice-preview", "voice-public") else "unknown"
     log.info("channel=%s outcome=%s", safe_channel, decision.outcome)
+    if public_mode():
+        return decision
     if not privileged:
         # No reviewed content or record metadata escapes into public shadow mode.
         return Decision("SHADOW", "staff_test_only", observed_outcome=decision.outcome)
@@ -155,7 +164,8 @@ def _submit(question):
         raise Unavailable("LACS workers busy")
     slots = _slots
     try:
-        future = _executor.submit(_get_client().suggest, question)
+        future = (_executor.submit(_get_client().suggest, question, public_delivery=True)
+                  if public_mode() else _executor.submit(_get_client().suggest, question))
     except Exception:
         slots.release()
         raise
@@ -164,6 +174,12 @@ def _submit(question):
 
 
 def _resolved(result):
+    if public_mode():
+        if (not isinstance(result, dict) or result.get("schemaVersion") != PUBLIC_SCHEMA
+                or result.get("requiresHumanReview") is not False
+                or result.get("deliveryPolicy") != PUBLIC_POLICY):
+            return blocked_decision()
+        return Decision("MATCH", suggestion=result)
     return Decision("NO_MATCH", "stable_coverage_no_exact_match") if result is None else Decision("MATCH", suggestion=result)
 
 

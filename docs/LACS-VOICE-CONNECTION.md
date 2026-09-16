@@ -1,5 +1,7 @@
 # LACS → Guru → website and VAPI connection
 
+The later [public delivery release](LACS-PUBLIC-DELIVERY.md) implements Raj's authorized public contract. This document describes the earlier staff preview.
+
 ## Status and the missing route
 
 Raj requested completing the shared live connection on 2026-09-16 while he reviews

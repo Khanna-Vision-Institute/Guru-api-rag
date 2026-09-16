@@ -16,7 +16,7 @@ from pathlib import Path
 import lacs_consumer
 
 MODEL = "kvi-lacs-staff-preview"
-SOURCE_FILES = ("main.py", "lacs_consumer.py", "lacs_approved_qa.py", "lacs_voice_preview.py")
+SOURCE_FILES = ("main.py", "lacs_consumer.py", "lacs_approved_qa.py", "lacs_voice_preview.py", "lacs_public_webhook.py")
 MAX_BODY = 32768
 HANDOFF = "This staff preview has no verified approved answer to read. Please review this question with the KVI team."
 
@@ -34,10 +34,10 @@ def _unique_object(pairs):
     return result
 
 
-def _question(body):
+def _question(body, model=MODEL):
     allowed = {"model", "messages", "stream", "temperature", "max_tokens", "top_p",
                "frequency_penalty", "presence_penalty", "stream_options", "tools", "tool_choice"}
-    if (not isinstance(body, dict) or set(body) - allowed or body.get("model") != MODEL
+    if (not isinstance(body, dict) or set(body) - allowed or body.get("model") != model
             or type(body.get("stream", False)) is not bool or body.get("tools", []) != []
             or body.get("tool_choice") not in (None, "none")):
         raise InvalidRequest()
@@ -60,10 +60,24 @@ def _question(body):
 class LacsVoicePreview:
     """ASGI app mounted at /vapi/lacs-preview; bounded before parsing the body."""
 
+    model = MODEL
+    env_prefix = "LACS_VOICE_PREVIEW"
+    channel = "voice-preview"
+    privileged = True
+    protocol = "lacs-voice-staff-preview-v1"
+    delivery_label = b"staff-only"
+    handoff = HANDOFF
+
+    def valid_suggestion(self, suggestion):
+        return suggestion.get("requiresHumanReview") is True
+
+    def available(self):
+        return self.enabled
+
     def __init__(self, *, enabled=None, key=None, resolver=None):
-        self.enabled = (os.getenv("LACS_VOICE_PREVIEW_ENABLED", "false") == "true"
+        self.enabled = (os.getenv(self.env_prefix + "_ENABLED", "false") == "true"
                         if enabled is None else enabled)
-        self.key = os.getenv("LACS_VOICE_PREVIEW_KEY", "") if key is None else key
+        self.key = os.getenv(self.env_prefix + "_KEY", "") if key is None else key
         self.resolver = resolver or lacs_consumer.consult_async
         self.active = 0
         self.source_hashes = None
@@ -78,7 +92,7 @@ class LacsVoicePreview:
         headers = [(b"content-type", b"application/json"), (b"cache-control", b"no-store"),
                    (b"x-content-type-options", b"nosniff")]
         if outcome:
-            headers += [(b"x-lacs-preview", b"staff-only"), (b"x-lacs-outcome", outcome.encode())]
+            headers += [(b"x-lacs-preview", self.delivery_label), (b"x-lacs-outcome", outcome.encode())]
         await send({"type": "http.response.start", "status": status, "headers": headers})
         await send({"type": "http.response.body", "body": json.dumps(value, ensure_ascii=True).encode()})
 
@@ -88,7 +102,7 @@ class LacsVoicePreview:
         path, root = scope.get("path", ""), scope.get("root_path", "")
         relative = path[len(root):] if root and path.startswith(root) else path
         route = (scope.get("method"), relative)
-        if (not self.enabled or route not in (("POST", "/chat/completions"), ("GET", "/status"))
+        if (not self.available() or route not in (("POST", "/chat/completions"), ("GET", "/status"))
                 or not isinstance(self.key, str) or not self.key.isascii()
                 or not 32 <= len(self.key) <= 256 or any(c.isspace() for c in self.key)):
             await self._json(send, 404, {"error": "not_found"})
@@ -103,7 +117,7 @@ class LacsVoicePreview:
             return
         if route == ("GET", "/status"):
             if self.source_hashes is not None:
-                await self._json(send, 200, {"protocol": "lacs-voice-staff-preview-v1",
+                await self._json(send, 200, {"protocol": self.protocol,
                                             "consumerEnabled": lacs_consumer.ENABLED,
                                             "deliveryMode": lacs_consumer.DELIVERY,
                                             "sourceSha256": self.source_hashes})
@@ -132,7 +146,7 @@ class LacsVoicePreview:
                     raise InvalidRequest()
                 body = json.loads(raw, object_pairs_hook=_unique_object,
                                   parse_constant=lambda _: (_ for _ in ()).throw(InvalidRequest()))
-                question = _question(body)
+                question = _question(body, self.model)
                 del raw
             except (InvalidRequest, ValueError, UnicodeError, RecursionError, asyncio.TimeoutError):
                 await self._json(send, 400, {"error": "invalid_request"})
@@ -142,11 +156,11 @@ class LacsVoicePreview:
                 return
             # SHADOW/BYPASS and NO_MATCH must never activate the unreconciled
             # legacy model through this new transport. Existing routes unchanged.
-            text, outcome = HANDOFF, "BLOCKED"
+            text, outcome = self.handoff, "BLOCKED"
             if decision.outcome == "MATCH" and isinstance(decision.suggestion, dict):
                 suggestion = decision.suggestion
                 answer = suggestion.get("answer")
-                if (suggestion.get("requiresHumanReview") is True and isinstance(answer, str)
+                if (self.valid_suggestion(suggestion) and isinstance(answer, str)
                         and 1 <= len(answer) <= 4000):
                     text, outcome = answer, "MATCH"
             elif decision.outcome == "NO_MATCH":
@@ -174,7 +188,7 @@ class LacsVoicePreview:
         work = disconnect = None
         try:
             # Only the authenticated staff transport may request staff preview.
-            work = asyncio.create_task(self.resolver(question, "voice-preview", privileged=True))
+            work = asyncio.create_task(self.resolver(question, self.channel, privileged=self.privileged))
             disconnect = asyncio.create_task(self._disconnected(receive))
             done, _ = await asyncio.wait({work, disconnect}, timeout=11,
                                          return_when=asyncio.FIRST_COMPLETED)
@@ -199,7 +213,7 @@ class LacsVoicePreview:
             pass
 
     async def _completion(self, send, text, streaming, outcome):
-        common = {"id": "chatcmpl-" + uuid.uuid4().hex, "created": int(time.time()), "model": MODEL}
+        common = {"id": "chatcmpl-" + uuid.uuid4().hex, "created": int(time.time()), "model": self.model}
         if not streaming:
             await self._json(send, 200, {**common, "object": "chat.completion", "choices": [
                 {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}
@@ -207,7 +221,7 @@ class LacsVoicePreview:
             return
         await send({"type": "http.response.start", "status": 200, "headers": [
             (b"content-type", b"text/event-stream"), (b"cache-control", b"no-store"),
-            (b"x-accel-buffering", b"no"), (b"x-lacs-preview", b"staff-only"),
+            (b"x-accel-buffering", b"no"), (b"x-lacs-preview", self.delivery_label),
             (b"x-lacs-outcome", outcome.encode()), (b"x-content-type-options", b"nosniff")
         ]})
         # Resolve the complete approved version before emitting any answer bytes.
@@ -223,3 +237,24 @@ class LacsVoicePreview:
             await send({"type": "http.response.body", "body": b"data: " + json.dumps(payload).encode() + b"\n\n",
                         "more_body": True})
         await send({"type": "http.response.body", "body": b"data: [DONE]\n\n"})
+
+
+class LacsVoicePublic(LacsVoicePreview):
+    """Server-authenticated Vapi transport for verbatim approved education."""
+    model = "kvi-lacs-public"
+    env_prefix = "LACS_VOICE_PUBLIC"
+    channel = "voice-public"
+    privileged = False
+    protocol = "lacs-voice-public-v1"
+    delivery_label = b"approved-public"
+    handoff = lacs_consumer.HANDOFF_TEXT
+
+    def available(self):
+        # Public transport never borrows the admin/staff-preview credential.
+        reused = self.key in (os.getenv("GURU_ADMIN_KEY", ""), os.getenv("LACS_VOICE_PREVIEW_KEY", ""))
+        return self.enabled and not reused and lacs_consumer.public_mode() and lacs_consumer.ENABLED
+
+    def valid_suggestion(self, suggestion):
+        return (suggestion.get("requiresHumanReview") is False
+                and suggestion.get("schemaVersion") == lacs_consumer.PUBLIC_SCHEMA
+                and suggestion.get("deliveryPolicy") == lacs_consumer.PUBLIC_POLICY)

@@ -60,7 +60,7 @@ def json_response(result):
     return json.loads(raw)
 
 
-def stream_text(result):
+def stream_text(result, model=MODEL):
     status, content_type, _, raw = result
     if status != 200 or content_type != "text/event-stream":
         raise CheckFailed("stream_not_available")
@@ -70,7 +70,7 @@ def stream_text(result):
     chunks = [json.loads(frame) for frame in frames[:-1]]
     if (not chunks or len({c["id"] for c in chunks}) != 1
             or chunks[-1]["choices"][0]["finish_reason"] != "stop"
-            or any(c["model"] != MODEL or c["object"] != "chat.completion.chunk"
+            or any(c["model"] != model or c["object"] != "chat.completion.chunk"
                    or len(c["choices"]) != 1 or "tool_calls" in c["choices"][0]["delta"] for c in chunks)):
         raise CheckFailed("stream_contract_invalid")
     return "".join(c["choices"][0]["delta"].get("content", "") for c in chunks)

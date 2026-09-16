@@ -24,11 +24,12 @@ class RouteTests(unittest.TestCase):
         self.search = Mock(return_value=[{"text": "Synthetic legacy context"}])
         self.generate = Mock(return_value=("Synthetic legacy answer", "synthetic-model"))
         self.facade = SimpleNamespace(consult=Mock(), consult_async=AsyncMock(),
-                                      is_admin=Mock(return_value=True),
+                                      is_admin=Mock(return_value=True), public_mode=Mock(return_value=False),
                                       blocked_decision=consumer.blocked_decision)
         self.namespace = {
             "lacs_consumer": self.facade, "datetime": datetime, "json": json, "print": Mock(),
             "AskRequest": object, "VapiChatRequest": object, "Request": object,
+            "public_webhook": AsyncMock(return_value={"synthetic": True}), "JSONResponse": SimpleNamespace,
             "AskResponse": SimpleNamespace, "VapiChatResponse": SimpleNamespace,
             "search_opensearch": self.search, "boost_rag_hits": lambda q, hits: hits,
             "generate_answer_with_fallback": self.generate,
@@ -92,6 +93,16 @@ class RouteTests(unittest.TestCase):
         self.search.assert_not_called()
         self.generate.assert_not_called()
 
+    def test_public_webhook_intercepts_before_legacy_body_logging_and_tools(self):
+        self.facade.public_mode.return_value = True
+        result = asyncio.run(self.namespace["vapi_webhook"](self.request))
+        self.assertEqual(result.content, {"synthetic": True})
+        self.namespace["public_webhook"].assert_awaited_once_with(self.request, rate_limit=self.namespace["check_rate_limit"])
+        self.request.json.assert_not_awaited()
+        self.namespace["print"].assert_not_called()
+        self.search.assert_not_called()
+        self.generate.assert_not_called()
+
     def test_only_ask_uses_admin_staff_preview(self):
         self.set_decision(consumer.blocked_decision())
         self.invoke("ask_guru")
@@ -104,3 +115,4 @@ class RouteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

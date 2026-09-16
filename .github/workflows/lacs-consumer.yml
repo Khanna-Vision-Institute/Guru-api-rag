@@ -6,6 +6,9 @@ on:
       - "lacs_approved_qa.py"
       - "lacs_consumer.py"
       - "lacs_voice_preview.py"
+      - "lacs_public_webhook.py"
+      - "scripts/verify_lacs_public.py"
+      - "deploy/vapi-lacs-public.json"
       - "scripts/verify_lacs_voice_preview.py"
       - "deploy/vapi-lacs-staff-preview.json"
       - "main.py"
@@ -23,7 +26,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
       - name: Synthetic routing and contract tests (no service credentials)
         run: python3 -B -m unittest discover -s tests/lacs -p 'test_*.py' -v
       - name: Compile without importing application services
-        run: python3 -m py_compile lacs_approved_qa.py lacs_consumer.py lacs_voice_preview.py main.py scripts/verify_lacs_voice_preview.py
+        run: python3 -m py_compile lacs_approved_qa.py lacs_consumer.py lacs_voice_preview.py lacs_public_webhook.py main.py scripts/verify_lacs_voice_preview.py scripts/verify_lacs_public.py
