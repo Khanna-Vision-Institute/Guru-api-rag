@@ -1,9 +1,9 @@
 """Synthetic contract tests; never contact LACS or load the Guru application."""
 import unittest
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
-from lacs_approved_qa import ApprovedQaClient, Unavailable, SCHEMA, _NoRedirect
+from lacs_approved_qa import ApprovedQaClient, Unavailable, SCHEMA, _NoRedirect, _question_hash
 
 REF = {"documentId": "clinical-qa:" + "a" * 64, "version": 2, "integrityHash": "b" * 64}
 ROW = dict(REF, question="Synthetic reviewed question?", keywords=["synthetic"], procedureTags=[])
@@ -14,7 +14,9 @@ ANSWER = dict(REF, schemaVersion=SCHEMA, requiresHumanReview=True, question=ROW[
 
 class ClientTests(unittest.TestCase):
     def client(self):
-        return ApprovedQaClient("https://lacs.example.invalid", lambda: "synthetic-test-only")
+        client = ApprovedQaClient("https://lacs.example.invalid", lambda: "synthetic-test-only")
+        client._coverage = Mock(return_value={"revision": "synthetic", "questionHashes": [_question_hash(ROW["question"])]})
+        return client
 
     def test_exact_match_sends_only_reference_then_returns_reviewed_suggestion(self):
         client = self.client()
@@ -60,11 +62,12 @@ class ClientTests(unittest.TestCase):
             with self.assertRaises(Unavailable):
                 client.suggest(ROW["question"])
 
-    def test_retirement_before_catalog_is_not_detectable_by_v1(self):
-        # This known coverage gap is why consumer live mode must remain blocked.
+    def test_retirement_before_catalog_is_blocked_by_coverage(self):
+        # Historical coverage prevents a withdrawn answer becoming a legacy miss.
         client = self.client()
         with patch.object(client, "_request", return_value=dict(PAGE, items=[])):
-            self.assertIsNone(client.suggest(ROW["question"]))
+            with self.assertRaises(Unavailable):
+                client.suggest(ROW["question"])
 
     def test_revision_or_unreviewed_response_rejected(self):
         for changes in [{"version": 3}, {"question": "Changed question"}, {"requiresHumanReview": False},
@@ -78,7 +81,8 @@ class ClientTests(unittest.TestCase):
         client = self.client()
         with patch.object(client, "_request", side_effect=[PAGE, ANSWER, dict(PAGE, items=[])]) as request:
             self.assertEqual(client.suggest(ROW["question"]), ANSWER)
-            self.assertIsNone(client.suggest(ROW["question"]))
+            with self.assertRaises(Unavailable):
+                client.suggest(ROW["question"])
             self.assertEqual(request.call_count, 3)
 
     def test_invalid_origin_and_redirect(self):
