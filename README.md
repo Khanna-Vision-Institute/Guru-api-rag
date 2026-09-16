@@ -19,6 +19,12 @@ documents every variable. To change a value: update the secret, then `sudo syste
 
 ## LACS approved-Q&A consumer
 
+The website's stored VAPI assistants need a separate model connection; they do not
+automatically use the text widget's webhook. The disabled-by-default authenticated
+voice transport, executable HTTP comparison and exact operator steps are in
+[LACS voice connection](docs/LACS-VOICE-CONNECTION.md). This is staff acceptance
+work; public delivery and existing public assistants remain unchanged.
+
 `lacs_consumer.py` consults LACS (`/v1/knowledge/approved-qa`) with a dedicated OIDC service identity before the
 FAQ/OpenSearch/LLM path, per `docs/operations/APPROVED-QA-CONSUMERS.md` in KVI-LACS-Core.
 
