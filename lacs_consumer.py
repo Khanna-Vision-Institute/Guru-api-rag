@@ -5,8 +5,7 @@ Errors, ambiguous matches and failed fresh resolution are BLOCKED, never NO_MATC
 Public SHADOW calls intentionally retain the existing Guru answer path, even when
 the observed outcome is BLOCKED; this is a test mode, not live clinical fallback.
 
-Live delivery is deliberately unavailable until LACS supplies retirement-aware
-coverage, the legacy corpus is reconciled, and patient delivery is authorized.
+Live delivery is deliberately unavailable until retirement-aware coverage is deployed and verified, the legacy corpus is reconciled, and patient delivery is authorized.
 Server configuration comes from the deployment's protected environment.
 """
 import asyncio
@@ -165,7 +164,7 @@ def _submit(question):
 
 
 def _resolved(result):
-    return Decision("NO_MATCH", "complete_catalog_no_exact_match") if result is None else Decision("MATCH", suggestion=result)
+    return Decision("NO_MATCH", "stable_coverage_no_exact_match") if result is None else Decision("MATCH", suggestion=result)
 
 
 def consult(question: str, channel: str = "ask", privileged: bool = False):

@@ -3,6 +3,7 @@
 Returns a reviewed suggestion, never authority for autonomous patient delivery.
 Uses a deployment-supplied short-lived token provider; never browser credentials.
 """
+import hashlib
 import json
 import re
 import time
@@ -11,6 +12,7 @@ import urllib.parse
 import urllib.request
 
 SCHEMA = "lacs-approved-qa-v1"
+COVERAGE_SCHEMA = "lacs-approved-qa-coverage-v1"
 ID = re.compile(r"clinical-qa:[a-f0-9]{64}\Z")
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 
@@ -34,8 +36,14 @@ def _reference(row):
 
 
 def _normalize(text):
-    # No fuzzy/semantic generalization of a potentially personal clinical question.
-    return " ".join(text.casefold().split()).rstrip("?")
+    # Byte-exact ASCII normalization shared with LACS; no Unicode case folding,
+    # compatibility normalization, semantic matching or personal-question inference.
+    lowered = text.translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
+    return re.sub(r"[ \t\r\n\f\v]+", " ", lowered).strip(" ").rstrip("?")
+
+
+def _question_hash(text):
+    return hashlib.sha256(("lacs-approved-qa-question-v1\0" + _normalize(text)).encode("utf-8")).hexdigest()
 
 
 class ApprovedQaClient:
@@ -49,7 +57,7 @@ class ApprovedQaClient:
         # No environment proxy may receive the Authorization header.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
-    def _request(self, path, body=None, deadline=None):
+    def _request(self, path, body=None, deadline=None, schema=SCHEMA):
         remaining = min(3.0, deadline - time.monotonic())
         if remaining <= 0:
             raise Unavailable("LACS deadline exceeded")
@@ -77,12 +85,27 @@ class ApprovedQaClient:
                 if len(raw) > 524288 or time.monotonic() > deadline:
                     raise Unavailable("LACS response limit exceeded")
                 value = json.loads(raw)
-                if not isinstance(value, dict) or value.get("schemaVersion") != SCHEMA or value.get("requiresHumanReview") is not True:
+                if not isinstance(value, dict) or value.get("schemaVersion") != schema or value.get("requiresHumanReview") is not True:
                     raise Unavailable("Invalid LACS contract")
                 return value
         except Exception:
             # Do not expose upstream bodies, credentials, URLs or raw exceptions to callers/logs.
             raise Unavailable("Approved knowledge unavailable") from None
+
+    def _coverage(self, deadline):
+        value = self._request("/v1/knowledge/approved-qa/coverage", deadline=deadline, schema=COVERAGE_SCHEMA)
+        if (not isinstance(value, dict) or set(value) != {"schemaVersion", "requiresHumanReview", "revision", "questionHashes"}
+                or value["schemaVersion"] != COVERAGE_SCHEMA or value["requiresHumanReview"] is not True):
+            raise Unavailable("Invalid coverage contract")
+        hashes = value["questionHashes"]
+        if (not isinstance(hashes, list) or len(hashes) > 5000
+                or any(not isinstance(item, str) or not HASH.fullmatch(item) for item in hashes)
+                or hashes != sorted(set(hashes))):
+            raise Unavailable("Incomplete or invalid coverage")
+        revision = hashlib.sha256((COVERAGE_SCHEMA + "\0" + "\n".join(hashes)).encode("utf-8")).hexdigest()
+        if value["revision"] != revision:
+            raise Unavailable("Invalid coverage revision")
+        return value
 
     def suggest(self, question):
         """Return exact approved suggestion or None. Fetch fresh on every invocation.
@@ -94,6 +117,7 @@ class ApprovedQaClient:
         if not isinstance(question, str) or not question.strip() or len(question) > 500:
             raise Unavailable("Invalid local question")
         deadline = time.monotonic() + 10
+        coverage = self._coverage(deadline)
         after = None
         seen = set()
         matches = []
@@ -122,6 +146,11 @@ class ApprovedQaClient:
         else:
             raise Unavailable("LACS catalog exceeds bounded client capacity")
         if not matches:
+            current_coverage = self._coverage(deadline)
+            if current_coverage["revision"] != coverage["revision"]:
+                raise Unavailable("Coverage changed during lookup")
+            if _question_hash(question) in current_coverage["questionHashes"]:
+                raise Unavailable("Previously covered question requires review")
             return None
         if len(matches) != 1:
             raise Unavailable("Ambiguous approved knowledge")

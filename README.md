@@ -50,10 +50,12 @@ Guru logging elsewhere in the application.
 
 ### Remaining gates before patient-facing LACS-first fallback
 
-1. Add a retirement-aware coverage/suppression contract. The v1 feed lists only currently approved records:
-   an answer withdrawn **before** catalog retrieval is indistinguishable from a question never covered.
-   Blocking a failed fresh resolve catches withdrawal **after** catalog retrieval, not that earlier case.
-   For this reason this patch explicitly refuses live mode; merely setting an environment variable is insufficient.
+1. Deploy and verify LACS's retirement-aware coverage endpoint before this consumer is tested.
+   The client checks coverage before catalog retrieval and again on an exact miss. A withdrawn
+   or renamed historical question blocks fallback; only stable, complete, never-covered exact
+   misses may return NO_MATCH. Missing/invalid/changed coverage blocks without downgrading.
+   These are read-time checks, not a lease against later changes, and do not cover paraphrases.
+   Live mode remains refused until all acceptance gates are complete.
 2. Reconcile the current live Guru FAQ/OpenSearch corpus with approved LACS coverage, including conflicting,
    retired and duplicate answers. Obtain a questions-and-answers-only export, not conversations, credentials,
    patient records or an unrestricted index dump. The repository FAQ file is not evidence of the full live corpus.
@@ -75,3 +77,14 @@ python3 -m py_compile lacs_approved_qa.py lacs_consumer.py main.py
 Fixtures are synthetic. Handler tests compile only the real handler functions with stubbed dependencies,
 avoiding main.py module-level service initialization. They verify the routing gates, not HTTP middleware,
 the actual deployed server, authentication setup, website behavior, voice-provider fallback, or clinical accuracy.
+
+### Historical coverage protocol
+
+The consumer requires `GET /v1/knowledge/approved-qa/coverage` with schema
+`lacs-approved-qa-coverage-v1`. It validates the complete sorted unique question-hash
+set and revision before use. These suppression keys contain no answer or reviewer text.
+Hashing and matching use ASCII-only case/whitespace normalization; Unicode is unchanged.
+No visitor text or hash is sent to LACS. A missing endpoint blocks staff testing; public
+shadow mode continues the unchanged legacy path and records only the observed outcome.
+The authoritative contract, bounds and rollout sequence live in LACS's
+`docs/operations/APPROVED-QA-CONSUMERS.md`. This is a follow-up stacked on Guru PR #2.
