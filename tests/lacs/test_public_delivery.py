@@ -59,6 +59,8 @@ class PublicTransportTests(unittest.IsolatedAsyncioTestCase):
             result = await public_webhook(request)
         self.assertEqual(result["messages"][0]["text"], PUBLIC["answer"])
         self.assertFalse(result["lacs"]["requiresHumanReview"])
+        self.assertNotIn("active_agent", result)
+        self.assertEqual(result["model_used"], "lacs-approved-qa")
         resolve.assert_awaited_once_with(ROW["question"], "webhook")
         self.assertNotIn("synthetic-session", json.dumps(result))
 
