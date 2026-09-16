@@ -1,0 +1,26 @@
+name: LACS consumer offline regression
+
+on:
+  pull_request:
+    paths:
+      - "lacs_approved_qa.py"
+      - "lacs_consumer.py"
+      - "main.py"
+      - "tests/lacs/**"
+      - ".github/workflows/lacs-consumer.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Synthetic routing and contract tests (no service credentials)
+        run: python3 -B -m unittest discover -s tests/lacs -p 'test_*.py' -v
+      - name: Compile without importing application services
+        run: python3 -m py_compile lacs_approved_qa.py lacs_consumer.py main.py

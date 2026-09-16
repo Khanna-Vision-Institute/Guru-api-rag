@@ -1,141 +1,203 @@
-"""Guru-side LACS approved-Q&A consumer (server only).
+"""Server-only LACS shadow consumer with explicit routing decisions.
 
-Consults LACS (https://staging.khannainstitute.com) through the dedicated OIDC service identity BEFORE Guru's own
-FAQ/OpenSearch/LLM path. Fail-closed: any error, timeout, 401/403/404/409/429 or ambiguity => None (abstain),
-and the caller continues with its existing behaviour. No visitor text is logged here; only outcome classes.
+None from the validated client means a completed catalog with no exact match.
+Errors, ambiguous matches and failed fresh resolution are BLOCKED, never NO_MATCH.
+Public SHADOW calls intentionally retain the existing Guru answer path, even when
+the observed outcome is BLOCKED; this is a test mode, not live clinical fallback.
 
-Environment (server .env):
-  LACS_CONSUMER_ENABLED=true|false      master switch (default false)
-  LACS_CONSUMER_DELIVERY=off|shadow|live   off: never call LACS; shadow (default): call + audit a match but do NOT change
-                                           the visitor answer; live: return the approved answer to the caller.
-                                           Privileged callers (X-Guru-Key = GURU_ADMIN_KEY) always receive the answer,
-                                           which is how staff verify the connection end-to-end without patient delivery.
-  LACS_ORIGIN, LACS_TOKEN_URL, LACS_CLIENT_ID, LACS_CLIENT_SECRET   trusted server configuration (client credentials).
+Live delivery is deliberately unavailable until LACS supplies retirement-aware
+coverage, the legacy corpus is reconciled, and patient delivery is authorized.
+Server configuration comes from the deployment's protected environment.
 """
+import asyncio
 import hmac
 import json
 import logging
+import math
 import os
 import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
-from lacs_approved_qa import ApprovedQaClient, Unavailable
+from lacs_approved_qa import ApprovedQaClient, Unavailable, _NoRedirect
 
 log = logging.getLogger("lacs_consumer")
 if not log.handlers:
-    _h = logging.StreamHandler()
-    _h.setFormatter(logging.Formatter("%(asctime)s [LACS] %(message)s"))
-    log.addHandler(_h)
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[LACS] %(message)s"))
+    log.addHandler(_handler)
 log.setLevel(logging.INFO)
 
 ENABLED = os.getenv("LACS_CONSUMER_ENABLED", "false").strip().lower() == "true"
 DELIVERY = os.getenv("LACS_CONSUMER_DELIVERY", "shadow").strip().lower()
-if DELIVERY not in ("off", "shadow", "live"):
-    DELIVERY = "shadow"
 ORIGIN = os.getenv("LACS_ORIGIN", "").strip()
 TOKEN_URL = os.getenv("LACS_TOKEN_URL", "").strip()
 CLIENT_ID = os.getenv("LACS_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.getenv("LACS_CLIENT_SECRET", "").strip()
 ADMIN_KEY = os.getenv("GURU_ADMIN_KEY", "").strip()
-OVERALL_DEADLINE_S = 10.5   # the LACS client budgets 10 s; the worker deadline must bound DNS/token time too
+OVERALL_DEADLINE_S = 10.5
+
+HANDOFF_TEXT = "I cannot verify an approved answer right now. Please contact the KVI team for help."
+
+
+@dataclass(frozen=True)
+class Decision:
+    outcome: str
+    reason: str = ""
+    suggestion: dict | None = None
+    observed_outcome: str | None = None
+
+    @property
+    def allow_legacy(self):
+        # BYPASS and SHADOW are explicit operational modes, not clinical misses.
+        return self.outcome in ("BYPASS", "SHADOW", "NO_MATCH")
+
+    @property
+    def text(self):
+        if self.outcome == "MATCH" and self.suggestion:
+            # Preserve reviewed wording. Never send it through the legacy LLM.
+            return self.suggestion["answer"]
+        return HANDOFF_TEXT
+
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="lacs")
+_slots = threading.BoundedSemaphore(2)
 _token_lock = threading.Lock()
 _token_cache = {"value": None, "exp": 0.0}
-_no_proxy_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_no_proxy_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 _client = None
-_client_error = None
 
 
 def _token_provider():
-    """Short-lived client-credentials token, cached until 30 s before expiry. Raises Unavailable on any failure."""
-    now = time.monotonic()
+    """Bounded short-lived token response; no redirects, proxy or raw error logs."""
     with _token_lock:
+        now = time.monotonic()
         if _token_cache["value"] and now < _token_cache["exp"] - 30:
             return _token_cache["value"]
-        if not (TOKEN_URL.startswith("https://") and CLIENT_ID and CLIENT_SECRET):
-            raise Unavailable("LACS credential not configured")
-        data = urllib.parse.urlencode({"grant_type": "client_credentials", "client_id": CLIENT_ID,
-                                       "client_secret": CLIENT_SECRET}).encode()
-        req = urllib.request.Request(TOKEN_URL, data=data, headers={"Content-Type": "application/x-www-form-urlencoded",
-                                                                     "Accept": "application/json"})
         try:
-            with _no_proxy_opener.open(req, timeout=3.0) as r:
-                body = json.loads(r.read(65536))
+            parsed = urllib.parse.urlsplit(TOKEN_URL)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                    or parsed.password or parsed.query or parsed.fragment
+                    or parsed.port not in (None, 443) or any(c.isspace() for c in TOKEN_URL)
+                    or not CLIENT_ID or not CLIENT_SECRET):
+                raise Unavailable("LACS credential not configured")
+            data = urllib.parse.urlencode({
+                "grant_type": "client_credentials", "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+            }).encode()
+            req = urllib.request.Request(TOKEN_URL, data=data, headers={
+                "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json",
+            })
+            with _no_proxy_opener.open(req, timeout=3.0) as response:
+                if response.status != 200 or response.headers.get_content_type() != "application/json":
+                    raise Unavailable("Invalid token response")
+                raw = response.read(65537)
+                if len(raw) > 65536:
+                    raise Unavailable("Oversized token response")
+                body = json.loads(raw)
+            if not isinstance(body, dict):
+                raise Unavailable("Invalid token response")
+            token, ttl = body.get("access_token"), body.get("expires_in")
+            if (not isinstance(token, str) or not token or len(token) > 16384
+                    or any(c.isspace() for c in token) or type(ttl) not in (int, float)
+                    or not math.isfinite(ttl) or not 0 < ttl <= 3600):
+                raise Unavailable("Invalid token response")
         except Exception:
-            raise Unavailable("LACS token endpoint unavailable") from None
-        token = body.get("access_token")
-        ttl = body.get("expires_in", 0)
-        if not isinstance(token, str) or not token or not isinstance(ttl, (int, float)) or ttl <= 0:
-            raise Unavailable("LACS token response invalid")
+            raise Unavailable("LACS token unavailable") from None
         _token_cache["value"] = token
         _token_cache["exp"] = now + float(ttl)
         return token
 
 
 def _get_client():
-    global _client, _client_error
-    if _client is None and _client_error is None:
-        try:
-            _client = ApprovedQaClient(ORIGIN, _token_provider)
-        except ValueError as e:
-            _client_error = str(e)
-            log.warning("consumer disabled: %s", _client_error)
+    global _client
+    if _client is None:
+        _client = ApprovedQaClient(ORIGIN, _token_provider)
     return _client
 
 
 def is_admin(request) -> bool:
-    """True when the HTTP request carries the server admin key (staff verification path)."""
     try:
         given = request.headers.get("x-guru-key", "")
+        return bool(ADMIN_KEY) and hmac.compare_digest(given or "", ADMIN_KEY)
     except Exception:
         return False
-    return bool(ADMIN_KEY) and hmac.compare_digest(given or "", ADMIN_KEY)
 
 
-def format_answer(result, channel: str) -> str:
-    text = result["answer"].strip()
-    urls = [u for u in result.get("supportingUrls", []) if isinstance(u, str)]
-    if channel == "ask" and urls:
-        text += "\n\nSources:\n" + "\n".join(f"- {u}" for u in urls[:5])
-    text += f"\n\n(Reviewed answer, version {result['version']}. For personal medical advice please speak with our team.)"
-    return text
+def blocked_decision():
+    return Decision("BLOCKED", "verification_unavailable")
+
+
+def _mode():
+    if not ENABLED or DELIVERY == "off":
+        return Decision("BYPASS", "disabled")
+    if DELIVERY != "shadow":
+        # Even explicit 'live' must not bypass the still-open acceptance gates.
+        return Decision("BLOCKED", "live_delivery_not_authorized")
+    return None
+
+
+def _present(decision, channel, privileged):
+    safe_channel = channel if channel in ("ask", "chat", "webhook") else "unknown"
+    log.info("channel=%s outcome=%s", safe_channel, decision.outcome)
+    if not privileged:
+        # No reviewed content or record metadata escapes into public shadow mode.
+        return Decision("SHADOW", "staff_test_only", observed_outcome=decision.outcome)
+    return decision
+
+
+def _submit(question):
+    # ThreadPoolExecutor's own queue is unbounded. Admit at most two jobs total,
+    # including timed-out jobs still finishing DNS/token/network operations.
+    if not _slots.acquire(blocking=False):
+        raise Unavailable("LACS workers busy")
+    slots = _slots
+    try:
+        future = _executor.submit(_get_client().suggest, question)
+    except Exception:
+        slots.release()
+        raise
+    future.add_done_callback(lambda _: slots.release())
+    return future
+
+
+def _resolved(result):
+    return Decision("NO_MATCH", "complete_catalog_no_exact_match") if result is None else Decision("MATCH", suggestion=result)
 
 
 def consult(question: str, channel: str = "ask", privileged: bool = False):
-    """Return {"text", "documentId", "version", "integrityHash", "supportingUrls"} or None (abstain)."""
-    if not ENABLED:
-        return None
-    if DELIVERY == "off" and not privileged:
-        return None
-    client = _get_client()
-    if client is None:
-        return None
-    started = time.monotonic()
+    mode = _mode()
+    if mode is not None:
+        return mode
+    future = None
     try:
-        future = _executor.submit(client.suggest, question)
-        result = future.result(timeout=OVERALL_DEADLINE_S)
-    except FutureTimeout:
-        log.info("channel=%s outcome=abstain reason=deadline ms=%d", channel, (time.monotonic() - started) * 1000)
-        return None
-    except Unavailable as e:
-        log.info("channel=%s outcome=abstain reason=unavailable detail=%s ms=%d", channel, str(e)[:60], (time.monotonic() - started) * 1000)
-        return None
-    except Exception as e:  # never let the LACS lane break the caller
-        log.info("channel=%s outcome=abstain reason=error type=%s", channel, type(e).__name__)
-        return None
-    if result is None:
-        log.info("channel=%s outcome=no-match ms=%d", channel, (time.monotonic() - started) * 1000)
-        return None
-    deliver = DELIVERY == "live" or privileged
-    log.info("channel=%s outcome=%s documentId=%s version=%s ms=%d", channel,
-             "match-delivered" if deliver else "match-shadow", result["documentId"], result["version"],
-             (time.monotonic() - started) * 1000)
-    if not deliver:
-        return None
-    return {"text": format_answer(result, channel), "documentId": result["documentId"], "version": result["version"],
-            "integrityHash": result["integrityHash"], "supportingUrls": list(result.get("supportingUrls", []))}
+        future = _submit(question)
+        decision = _resolved(future.result(timeout=OVERALL_DEADLINE_S))
+    except Exception:
+        if future is not None:
+            future.cancel()
+        decision = blocked_decision()
+    return _present(decision, channel, privileged)
+
+
+async def consult_async(question: str, channel: str = "webhook", privileged: bool = False):
+    mode = _mode()
+    if mode is not None:
+        return mode
+    future = None
+    try:
+        future = _submit(question)
+        result = await asyncio.wait_for(asyncio.wrap_future(future), timeout=OVERALL_DEADLINE_S)
+        decision = _resolved(result)
+    except asyncio.CancelledError:
+        if future is not None:
+            future.cancel()
+        raise
+    except Exception:
+        if future is not None:
+            future.cancel()
+        decision = blocked_decision()
+    return _present(decision, channel, privileged)

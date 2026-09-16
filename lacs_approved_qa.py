@@ -92,7 +92,7 @@ class ApprovedQaClient:
         or cache the answer for later delivery.
         """
         if not isinstance(question, str) or not question.strip() or len(question) > 500:
-            return None
+            raise Unavailable("Invalid local question")
         deadline = time.monotonic() + 10
         after = None
         seen = set()
@@ -121,8 +121,10 @@ class ApprovedQaClient:
             after = cursor
         else:
             raise Unavailable("LACS catalog exceeds bounded client capacity")
-        if len(matches) != 1:
+        if not matches:
             return None
+        if len(matches) != 1:
+            raise Unavailable("Ambiguous approved knowledge")
         selected = matches[0]
         ref = _reference(selected)
         result = self._request("/v1/knowledge/approved-qa/resolve", ref, deadline)
