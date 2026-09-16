@@ -71,6 +71,10 @@ import lacs_consumer  # LACS approved-Q&A consumer (remediation 2026-09-15)
 
 app = FastAPI(title="Guru AI RAG API", version="1.0.0", description="Medical AI assistant with RAG capabilities")
 
+# Separate, authenticated transport for staff VAPI acceptance. Disabled by default.
+from lacs_voice_preview import LacsVoicePreview
+app.mount("/vapi/lacs-preview", LacsVoicePreview())
+
 # Deduplication: Track processed tool calls to prevent duplicate bookings
 processed_tool_calls = set()
 

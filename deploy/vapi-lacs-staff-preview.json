@@ -1,0 +1,28 @@
+{
+  "name": "KVI STAFF ONLY - LACS connection test",
+  "firstMessage": "This is the KVI staff knowledge connection test. Please use an approved general educational question and no patient information.",
+  "model": {
+    "provider": "custom-llm",
+    "url": "https://khannainstitute.com/api/guru/vapi/lacs-preview",
+    "model": "kvi-lacs-staff-preview",
+    "metadataSendMode": "off",
+    "temperature": 0,
+    "numFastTurns": 0,
+    "timeoutSeconds": 15,
+    "maxTokens": 2000,
+    "messages": [],
+    "tools": [],
+    "toolIds": []
+  },
+  "voice": {
+    "provider": "vapi",
+    "voiceId": "Kai"
+  },
+  "artifactPlan": {
+    "recordingEnabled": false,
+    "videoRecordingEnabled": false,
+    "loggingEnabled": false,
+    "pcapEnabled": false,
+    "transcriptPlan": { "enabled": false }
+  }
+}

@@ -140,7 +140,7 @@ def _mode():
 
 
 def _present(decision, channel, privileged):
-    safe_channel = channel if channel in ("ask", "chat", "webhook") else "unknown"
+    safe_channel = channel if channel in ("ask", "chat", "webhook", "voice-preview") else "unknown"
     log.info("channel=%s outcome=%s", safe_channel, decision.outcome)
     if not privileged:
         # No reviewed content or record metadata escapes into public shadow mode.
