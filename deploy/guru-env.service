@@ -1,0 +1,14 @@
+[Unit]
+Description=Guru: materialise runtime configuration from AWS Secrets Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=AWS_REGION=us-east-1
+ExecStart=/home/ubuntu/guru_rag/venv/bin/python /usr/local/bin/guru-load-env
+ExecStartPost=/bin/chown root:ubuntu /run/guru/env
+
+[Install]
+WantedBy=multi-user.target

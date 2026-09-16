@@ -13,7 +13,7 @@ def get_opensearch_client():
             "host": os.getenv("OPENSEARCH_ENDPOINT"),
             "port": 443
         }],
-        http_auth=("admin", "@Gur#Ur@g25"),
+        http_auth=(os.getenv("OPENSEARCH_USER", "admin"), os.environ["OPENSEARCH_PASSWORD"]),
         use_ssl=True,
         verify_certs=True
     )
@@ -30,6 +30,14 @@ def embed_text(text):
 
 def search_opensearch(query, top_k=5):
     """Perform KNN vector search in OpenSearch"""
+    endpoint = (os.getenv("OPENSEARCH_ENDPOINT") or "").strip()
+    if not endpoint or endpoint.lower() in ("none", "null", "disabled"):
+        print(
+            "[search_opensearch] OPENSEARCH_ENDPOINT not set or disabled; "
+            "skipping vector search (local dev / RAG off). Returning no hits."
+        )
+        return []
+
     client = get_opensearch_client()
 
     # Generate embedding for the query

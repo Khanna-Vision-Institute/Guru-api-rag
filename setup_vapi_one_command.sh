@@ -5,7 +5,7 @@ echo "🚀 Setting up Vapi integration..."
 
 # Add API key to .env if not exists
 if ! grep -q "VAPI_API_KEY=" /home/ubuntu/guru_rag/.env 2>/dev/null; then
-    echo "VAPI_API_KEY=0f5bd46c-6de9-42a1-a75c-043bd39a3fec" >> /home/ubuntu/guru_rag/.env
+    echo "VAPI_API_KEY=${VAPI_API_KEY:?set VAPI_API_KEY in your shell first}" >> /home/ubuntu/guru_rag/.env
     echo "✅ Added VAPI_API_KEY to .env"
 fi
 

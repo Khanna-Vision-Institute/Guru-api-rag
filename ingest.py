@@ -43,7 +43,7 @@ client = OpenSearch(
         "host": "vpc-guru-rag-w7f4dc2djtwacgeelhfpd7u7li.us-east-1.es.amazonaws.com",
         "port": 443
     }],
-    http_auth=("admin", "@Gur#Ur@g25"),
+    http_auth=(os.getenv("OPENSEARCH_USER", "admin"), os.environ["OPENSEARCH_PASSWORD"]),
     use_ssl=True,
     verify_certs=True
 )

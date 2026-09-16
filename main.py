@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Tuple
 import json
@@ -8,27 +9,179 @@ import re
 import httpx
 import traceback
 from datetime import datetime
+from collections import defaultdict
+import time
 from utils import search_opensearch, index_document, embed_text
-from llm_providers import generate_answer_with_fallback, generate_answer
+from llm_providers import (
+    generate_answer_with_fallback,
+    generate_answer_for_agent,
+    generate_answer,
+    PRICING_FACTS,
+    DR_KHANNA_FACTS,
+    CLINIC_POLICIES_FACTS,
+    sanitize_guru_answer,
+)
+from booking_normalize import normalize_booking_payload
+from agent_ecosystem import eco_turn, init_eco_session
+
+
+def boost_rag_hits(query: str, hits: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Prepend official policy text so OpenSearch noise does not override biography/age rules."""
+    ql = (query or "").lower()
+    pre: List[Dict[str, Any]] = []
+    if ("khanna" in ql or "dr." in ql or "doctor" in ql) and any(
+        x in ql for x in ("practicing", "practice", "how long", "years", "experience", "career", "ophthalmology")
+    ):
+        pre.append({"text": DR_KHANNA_FACTS})
+    if any(x in ql for x in ("lasik", "smile", "refractive", "vision correction", "appointment", "book", "consult", "schedule")) and any(
+        x in ql
+        for x in (
+            "5 year",
+            "five year",
+            "five-year",
+            "4 year",
+            "6 year",
+            "7 year",
+            "child",
+            "kid",
+            "under 13",
+            "under thirteen",
+            "toddler",
+            "baby",
+            "preschool",
+        )
+    ):
+        pre.append({"text": CLINIC_POLICIES_FACTS})
+    return pre + (hits or [])
+
+# Sanitize Guru responses: never return wrong/outdated phone numbers
+def sanitize_phone_in_response(text: str) -> str:
+    """Replace wrong phone numbers with correct office number."""
+    if not text or not isinstance(text, str):
+        return text
+    # (310) 997-4490 and variants -> (805) 230-2126
+    for wrong in ['(310) 997-4490', '310-997-4490', '310.997.4490', '3109974490']:
+        text = text.replace(wrong, '(805) 230-2126')
+    return text
 from ingest import scrape, split
-from faq_matcher import match_faq
 from dotenv import load_dotenv
 
 load_dotenv()
+import lacs_consumer  # LACS approved-Q&A consumer (remediation 2026-09-15)
 
 app = FastAPI(title="Guru AI RAG API", version="1.0.0", description="Medical AI assistant with RAG capabilities")
 
 # Deduplication: Track processed tool calls to prevent duplicate bookings
 processed_tool_calls = set()
 
-# Add CORS middleware
+# ── CORS: only allow requests from our own site ──────────────────────────────
+ALLOWED_ORIGINS = [
+    "https://khannainstitute.com",
+    "https://www.khannainstitute.com",
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:8080",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+# ---- Guru access control (remediation 2026-09-15) ----
+import hmac as _hmac
+from fastapi.responses import JSONResponse as _ACJSONResponse
+
+_GURU_ADMIN_KEY = os.getenv("GURU_ADMIN_KEY", "").strip()
+_GURU_READONLY_KEYS = [k.strip() for k in os.getenv("GURU_READONLY_KEYS", "").split(",") if k.strip()]
+_GURU_WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
+_GURU_ENFORCE_TOOL_SECRET = os.getenv("GURU_ENFORCE_TOOL_SECRET", "false").lower() == "true"
+_AC_ADMIN_PATHS = ("/logs", "/docs", "/openapi.json", "/redoc", "/ingest-website", "/embed")
+_AC_READ_PATHS = ("/ask", "/search")
+
+
+def _ac_key_ok(given: str, allowed) -> bool:
+    given = given or ""
+    return any(k and _hmac.compare_digest(given, k) for k in allowed)
+
+
+@app.middleware("http")
+async def guru_access_control(request: Request, call_next):
+    path = request.url.path
+    key = request.headers.get("x-guru-key", "")
+    if path.startswith(_AC_ADMIN_PATHS):
+        if not _ac_key_ok(key, [_GURU_ADMIN_KEY]):
+            return _ACJSONResponse({"detail": "Not Found"}, status_code=404)
+    elif path.startswith(_AC_READ_PATHS):
+        if not _ac_key_ok(key, _GURU_READONLY_KEYS + [_GURU_ADMIN_KEY]):
+            return _ACJSONResponse({"detail": "Unauthorized"}, status_code=401)
+    elif path.startswith("/vapi/tool/") and not path.endswith("/health"):
+        secret = request.headers.get("x-vapi-secret", "")
+        if not (_GURU_WEBHOOK_SECRET and _hmac.compare_digest(secret, _GURU_WEBHOOK_SECRET)):
+            print(f"[ACCESS] tool call without valid x-vapi-secret on {path} (enforce={_GURU_ENFORCE_TOOL_SECRET})")
+            if _GURU_ENFORCE_TOOL_SECRET:
+                return _ACJSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+# ---- end Guru access control ----
+
+
+# ── Rate limiting (in-memory, per IP) ───────────────────────────────────────
+# Allows 20 messages/minute and 200 messages/hour per IP
+_rate_buckets: Dict[str, Dict] = defaultdict(lambda: {
+    "min_count": 0, "min_ts": 0.0,
+    "hour_count": 0, "hour_ts": 0.0,
+})
+RATE_LIMIT_PER_MINUTE = 20
+RATE_LIMIT_PER_HOUR   = 200
+
+def check_rate_limit(ip: str) -> Optional[str]:
+    now = time.time()
+    b = _rate_buckets[ip]
+    # reset minute bucket
+    if now - b["min_ts"] > 60:
+        b["min_count"] = 0
+        b["min_ts"] = now
+    # reset hour bucket
+    if now - b["hour_ts"] > 3600:
+        b["hour_count"] = 0
+        b["hour_ts"] = now
+    b["min_count"]  += 1
+    b["hour_count"] += 1
+    if b["min_count"] > RATE_LIMIT_PER_MINUTE:
+        return "Too many messages — please wait a moment before sending again."
+    if b["hour_count"] > RATE_LIMIT_PER_HOUR:
+        return "Hourly message limit reached. Please call us at (805) 230-2126."
+    return None
+
+# ── Input sanitisation ───────────────────────────────────────────────────────
+MAX_MESSAGE_LENGTH = 800  # characters
+
+# Common prompt-injection patterns to detect and neutralise
+_INJECTION_PATTERNS = [
+    r"ignore\s+(all\s+)?(previous|prior|above|earlier)\s+instructions",
+    r"forget\s+(all\s+)?(previous|prior|above|earlier)",
+    r"you\s+are\s+now\s+(a\s+)?(?!brandi|guru|max|lucy|rose|kate|sage|buffett|barbie)",
+    r"act\s+as\s+(a\s+)?(?!brandi|guru|max|lucy|rose|kate|sage|buffett|barbie)",
+    r"system\s*:\s*you",
+    r"<\s*system\s*>",
+    r"\[system\]",
+    r"jailbreak",
+    r"do\s+anything\s+now",
+    r"dan\s+mode",
+]
+_INJECTION_RE = re.compile("|".join(_INJECTION_PATTERNS), re.IGNORECASE)
+
+def sanitize_input(text: str) -> tuple[str, bool]:
+    """Returns (cleaned_text, was_injected). Strips injection attempts."""
+    if not text:
+        return "", False
+    text = text.strip()[:MAX_MESSAGE_LENGTH]
+    if _INJECTION_RE.search(text):
+        return "Tell me about your vision correction options.", True
+    return text, False
 
 # ---------- Request/Response Models ----------
 class AskRequest(BaseModel):
@@ -74,51 +227,54 @@ class VapiChatResponse(BaseModel):
 # ---------- Booking State Management ----------
 # In-memory storage for booking sessions (in production, use Redis or database)
 booking_sessions: Dict[str, Dict[str, Any]] = {}
-cancel_sessions: Dict[str, Dict[str, Any]] = {}
 
-def detect_cancel_intent(message: str) -> bool:
-    """Detect if user wants to cancel an appointment"""
-    cancel_keywords = [
-        'cancel', 'cancellation', 'cancel my appointment', 'cancel appointment',
-        'i need to cancel', 'want to cancel', 'would like to cancel',
-        'cancel my booking', 'cancel my consultation', 'cancel my visit'
-    ]
-    message_lower = message.lower()
-    return any(keyword in message_lower for keyword in cancel_keywords)
-
-def extract_procedure(message: str) -> Optional[str]:
-    """Extract procedure type from message"""
-    procedures = ['LASIK', 'SMILE', 'EVO ICL', 'PIE', 'Cataract', 'Consultation', 'Exam', 'New Patient Exam']
-    message_lower = message.lower()
-    for proc in procedures:
-        if proc.lower() in message_lower:
-            return proc
-    return None
+# Multi-agent (Brandi + specialists) session state keyed by Vapi/web call id
+ecosystem_sessions: Dict[str, Dict[str, Any]] = {}
 
 def detect_booking_intent(message: str) -> bool:
-    """Detect if user wants to book an appointment"""
-    booking_keywords = [
-        'book', 'booking', 'schedule', 'appointment', 'consultation',
-        'make an appointment', 'set up', 'reserve', 'available times',
-        'when can i come', 'i want to see', 'i need an appointment',
-        'i would like to', 'can i schedule', 'want to book', 'need to book',
-        'set up appointment', 'make appointment', 'book me', 'schedule me',
-        'when available', 'available dates', 'book consultation', 'schedule consultation'
+    """Detect if user wants to book an appointment — requires explicit booking action words."""
+    t = message.lower()
+    # Must contain a clear booking action word
+    booking_actions = [
+        'book an appointment', 'book a consultation', 'book me', 'book now',
+        'schedule an appointment', 'schedule a consultation', 'schedule me',
+        'make an appointment', 'set up an appointment', 'set up a consultation',
+        'want to book', 'need to book', 'want to schedule', 'need to schedule',
+        'can i book', 'can i schedule', 'i want to book', 'i need to book',
+        'i want to schedule', 'i need to schedule',
+        'i need an appointment', 'i need a consultation',
+        'available dates', 'available times', 'when can i come in',
+        'reserve a spot', 'reserve an appointment',
     ]
-    message_lower = message.lower()
-    return any(keyword in message_lower for keyword in booking_keywords)
+    return any(kw in t for kw in booking_actions)
+
+_NAME_SKIP_WORDS = {
+    'please', 'book', 'an', 'appointment', 'schedule', 'consultation',
+    'help', 'want', 'need', 'i', 'would', 'like', 'to', 'a', 'the',
+    'can', 'you', 'with', 'me', 'my', 'for', 'how', 'what', 'when',
+    'yes', 'no', 'okay', 'ok', 'sure', 'thanks', 'hello', 'hi', 'hey',
+}
 
 def extract_name(message: str) -> Optional[str]:
-    """Extract name from message"""
-    # Look for patterns like "my name is X", "I'm X", "call me X"
+    """Extract patient name — rejects booking-intent phrases."""
+    # Explicit name patterns
     patterns = [
-        r"(?:my name is|i'm|i am|call me|this is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)",
-        r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)$",  # Just a name
+        r"(?:my name is|i'?m called|call me|this is|i am|i'?m)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)",
     ]
     for pattern in patterns:
-        match = re.search(pattern, message, re.IGNORECASE)
+        match = re.search(pattern, message.strip(), re.IGNORECASE)
         if match:
-            return match.group(1).strip()
+            name = match.group(1).strip()
+            words = name.lower().split()
+            if not any(w in _NAME_SKIP_WORDS for w in words):
+                return name.title()
+
+    # Bare 1–2 word reply that looks like a proper name (no skip words)
+    words = message.strip().split()
+    if 1 <= len(words) <= 2 and all(re.match(r'^[A-Za-z]+$', w) for w in words):
+        if not any(w.lower() in _NAME_SKIP_WORDS for w in words):
+            return message.strip().title()
+
     return None
 
 def extract_email(message: str) -> Optional[str]:
@@ -143,17 +299,16 @@ def extract_phone(message: str) -> Optional[str]:
 
 def extract_age(message: str) -> Optional[int]:
     """Extract age from message"""
-    # Look for "I'm X years old", "age X", "X years", or just "35"
     patterns = [
-        r"(?:i'm|i am|age|aged)\s+(\d+)\s*(?:years?|old)?",
-        r"(\d+)\s*(?:years?|old)",
-        r"^\s*(\d{1,3})\s*$",  # Standalone number e.g. "35"
+        r"(?:i'?m|i am|age|aged)\s+(\d{1,3})\s*(?:years?|y\/o|yo|old)?",
+        r"\b(\d{1,3})\s*(?:years?\s*old)\b",
+        r"^\s*(\d{1,3})\s*$",   # bare number on its own line — treat as age
     ]
     for pattern in patterns:
-        match = re.search(pattern, message, re.IGNORECASE)
+        match = re.search(pattern, message.strip(), re.IGNORECASE)
         if match:
             age = int(match.group(1))
-            if 1 <= age <= 120:  # Reasonable age range
+            if 1 <= age <= 120:
                 return age
     return None
 
@@ -167,39 +322,53 @@ def extract_location(message: str) -> Optional[str]:
     return None
 
 def extract_date_time(message: str) -> Tuple[Optional[str], Optional[str]]:
-    """Extract date and time from message"""
-    # This is a simplified version - in production, use a proper date parser
-    # For now, we'll guide the user to provide specific dates
+    """Extract date and time from message, returning actual matched text."""
     date = None
     time = None
-    
-    # Look for common date patterns
+
     date_patterns = [
-        r'(?:on|for|this|next)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)',
         r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}',
-        r'(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}',
+        # "13th May 2026", "May 13", "May 13th 2026"
+        r'\d{1,2}(?:st|nd|rd|th)?\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)(?:\s*,?\s*\d{4})?',
+        r'(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s*,?\s*\d{4})?',
+        r'(?:on|for|this|next)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)',
+        r'(?:tomorrow|today)',
     ]
-    
+
     for pattern in date_patterns:
-        if re.search(pattern, message, re.IGNORECASE):
-            date = "extracted"  # Placeholder - would need proper parsing
-    
-    # Look for time patterns
+        match = re.search(pattern, message, re.IGNORECASE)
+        if match:
+            date = match.group(0).strip()
+            break
+
+    # Use anchored time pattern: match full "HH:MM AM/PM" before trying bare "H AM/PM"
+    # The negative lookbehind prevents matching "00 AM" inside "10:00 AM"
     time_patterns = [
-        r'\d{1,2}:\d{2}\s*(?:am|pm)',
-        r'\d{1,2}\s*(?:am|pm)',
+        r'\b(1[0-2]|0?[1-9]):[0-5]\d\s*(?:am|pm)\b',   # 10:00 AM
+        r'(?<!\d)(1[0-2]|0?[1-9])\s*(?:am|pm)\b',       # 10 AM  (not preceded by digit)
     ]
-    
+
     for pattern in time_patterns:
         match = re.search(pattern, message, re.IGNORECASE)
         if match:
-            time = match.group(0)
-    
+            time = match.group(0).strip()
+            break
+
     return date, time
 
-async def submit_booking(booking_data: Dict[str, Any]) -> Dict[str, Any]:
+async def submit_booking(booking_data: Dict[str, Any], skip_emails: bool = False) -> Dict[str, Any]:
     """Submit booking to the booking API"""
     try:
+        default_page = booking_data.get('pageUrl') or 'Web Voice Call (KVI Chat)'
+        booking_data = normalize_booking_payload(
+            booking_data,
+            page_url=default_page,
+        )
+        if not booking_data.get('surgeryExamType'):
+            booking_data = {**booking_data, 'surgeryExamType': 'General Consultation'}
+        if not booking_data.get('pageUrl'):
+            booking_data = {**booking_data, 'pageUrl': default_page}
+
         # The booking API endpoint (configurable via environment variable)
         booking_url = os.getenv("BOOKING_API_URL", "https://khannainstitute.com/api/booking/submit")
         
@@ -228,54 +397,32 @@ async def submit_booking(booking_data: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[SUBMIT_BOOKING] Traceback: {traceback.format_exc()}")
         raise
 
-def get_next_booking_question(session_data: Dict[str, Any]) -> str:
+def get_next_booking_question(session_data: Dict[str, Any]) -> Optional[str]:
     """Determine what question to ask next for booking"""
-    if not session_data.get('fullName'):
-        return "Great! I'd be happy to help you schedule a consultation. To get started, may I have your full name?"
-    
+    name = session_data.get('fullName')
+
+    if not name:
+        return "I'd be happy to help you schedule a consultation! To get started, may I have your full name?"
+
     if not session_data.get('age'):
-        return f"Thank you, {session_data.get('fullName', 'there')}. What is your age?"
-    
+        return f"Thank you, {name}! What is your age?"
+
     if not session_data.get('email'):
         return "What is your email address?"
-    
+
     if not session_data.get('phone'):
         return "What is your phone number?"
-    
+
     if not session_data.get('location'):
         return "Which location would you prefer? We have offices in Beverly Hills and Westlake Village."
-    
+
     if not session_data.get('date'):
         return "What date would you like to schedule your consultation? Please provide a specific date."
-    
+
     if not session_data.get('time'):
         return "What time would work best for you?"
-    
+
     return None  # All information collected
-
-def get_next_cancel_question(session_data: Dict[str, Any]) -> str:
-    """Determine what question to ask next for cancellation"""
-    if not session_data.get('fullName'):
-        return "I'd be happy to help you cancel your appointment. May I have your full name?"
-    if not session_data.get('age'):
-        return f"Thank you, {session_data.get('fullName', 'there')}. What is your age?"
-    if not session_data.get('procedure'):
-        return "Which procedure or appointment type would you like to cancel? For example: LASIK, SMILE, EVO ICL, PIE, Consultation, or Exam."
-    if not session_data.get('email'):
-        return "What is your email address?"
-    return None
-
-async def submit_cancel(cancel_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Submit cancellation to the API"""
-    try:
-        cancel_url = os.getenv("CANCEL_API_URL", "https://khannainstitute.com/api/booking/cancel")
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(cancel_url, json=cancel_data, headers={"Content-Type": "application/json"})
-            response.raise_for_status()
-            return response.json()
-    except Exception as e:
-        print(f"[SUBMIT_CANCEL] Error: {e}")
-        raise
 
 # ---------- Logging ----------
 LOG_FILE = "guru_logs.json"
@@ -316,6 +463,52 @@ def log_interaction(query: str, response: str, model_used: str, hits_count: int)
 
 # ---------- API Endpoints ----------
 
+@app.post("/tts")
+async def text_to_speech(request: Request):
+    """Convert text to speech using OpenAI TTS — used by the chat widget."""
+    try:
+        # Rate limit TTS same as chat
+        client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
+        client_ip = client_ip.split(",")[0].strip()
+        rate_msg = check_rate_limit(client_ip)
+        if rate_msg:
+            return JSONResponse(status_code=429, content={"error": rate_msg})
+
+        body = await request.json()
+        text = (body.get("text") or "").strip()
+        voice = body.get("voice", "nova")   # nova, alloy, echo, fable, onyx, shimmer
+
+        if not text:
+            return JSONResponse(status_code=400, content={"error": "No text provided"})
+
+        # Strip markdown so TTS reads cleanly
+        import re as _re
+        clean = _re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+        clean = _re.sub(r'\*(.*?)\*',     r'\1', clean)
+        clean = _re.sub(r'#+\s',          '',    clean)
+        clean = _re.sub(r'https?://\S+',  'visit our website', clean)
+        clean = clean[:4096]  # OpenAI TTS limit
+
+        import openai
+        client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+        response = await client.audio.speech.create(
+            model="tts-1",
+            voice=voice,
+            input=clean,
+        )
+
+        from fastapi.responses import Response as FastResponse
+        return FastResponse(
+            content=response.content,
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    except Exception as e:
+        print(f"[TTS] Error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 @app.get("/health", response_model=HealthResponse)
 def health_check():
     """Health check endpoint"""
@@ -326,21 +519,36 @@ def health_check():
     )
 
 @app.post("/ask", response_model=AskResponse)
-def ask_guru(request: AskRequest):
+def ask_guru(request: AskRequest, http_request: Request):
     """
     Main RAG endpoint - takes a query, searches vector DB, and generates answer with fallback
     """
     try:
+        # ---- LACS consumer hook (/ask) ----
+        _lacs = lacs_consumer.consult(request.query, "ask", privileged=lacs_consumer.is_admin(http_request))
+        if _lacs is not None:
+            return AskResponse(answer=_lacs["text"], model_used="lacs-approved-qa", hits=[], timestamp=datetime.now().isoformat())
         # Search for relevant documents
         hits = search_opensearch(request.query, request.top_k)
+        hits = boost_rag_hits(request.query, hits)
+
+        # For pricing/cost questions, prepend official pricing + contact facts
+        pricing_keywords = ['cost', 'price', 'pricing', 'how much', 'fee', 'charge', 'exam cost', 'consultation cost']
+        contact_keywords = ['phone number', 'phone', 'contact number', 'call us', 'our number', 'address', 'westlake', 'location', 'reach us']
+        if any(kw in request.query.lower() for kw in pricing_keywords) or any(kw in request.query.lower() for kw in contact_keywords):
+            hits = [{"text": PRICING_FACTS}] + (hits or [])
 
         if not hits:
             # Even with no hits, provide helpful response about Khanna Institute
-            response = "I don't have enough specific information about that in my knowledge base. However, I can tell you that Khanna Vision Institute, led by Dr. Rajesh Khanna, offers comprehensive vision correction services including LASIK, SMILE laser, EVO ICL, and other advanced procedures. Please contact us directly at (805) 327-5758 or visit our website for more detailed information."
+            response = "I don't have enough specific information about that in my knowledge base. However, I can tell you that Khanna Vision Institute, led by Dr. Rajesh Khanna, offers comprehensive vision correction services including LASIK, SMILE laser, EVO ICL, and other advanced procedures. Please contact us directly at (805) 230-2126 or visit https://khannainstitute.com/contact/schedule-consultation/ for more information."
             model_used = "none"
         else:
             # Generate answer with fallback logic
             response, model_used = generate_answer_with_fallback(request.query, hits)
+
+        # Sanitize: enforce Dr. Khanna years; never return wrong phone numbers
+        response = sanitize_guru_answer(response, request.query)
+        response = sanitize_phone_in_response(response)
 
         # Log the interaction
         log_interaction(request.query, response, model_used, len(hits))
@@ -718,7 +926,7 @@ async def vapi_booking_tool(request: Request):
                 }
             else:
                 # Booking API returned but indicated failure
-                error_msg = "I encountered an issue while processing your booking. Please try again or contact us directly at (805) 327-5758."
+                error_msg = "I encountered an issue while processing your booking. Please try again or contact us directly at (805) 230-2126."
                 print(f"[VAPI TOOL] ⚠️ Booking API returned failure: {json.dumps(result)}")
                 return {
                     "results": [
@@ -730,7 +938,7 @@ async def vapi_booking_tool(request: Request):
                 }
             
         except httpx.TimeoutException as e:
-            error_msg = "The booking system is taking longer than expected. Please try again in a moment or contact us directly at (805) 327-5758."
+            error_msg = "The booking system is taking longer than expected. Please try again in a moment or contact us directly at (805) 230-2126."
             print(f"[VAPI TOOL] ❌ Booking timeout: {str(e)}")
             print(f"[VAPI TOOL] Traceback: {traceback.format_exc()}")
             return {
@@ -742,7 +950,7 @@ async def vapi_booking_tool(request: Request):
                 ]
             }
         except httpx.HTTPStatusError as e:
-            error_msg = f"I encountered an issue while booking your appointment. Please try again or contact us directly at (805) 327-5758."
+            error_msg = f"I encountered an issue while booking your appointment. Please try again or contact us directly at (805) 230-2126."
             print(f"[VAPI TOOL] ❌ HTTP error: {e.response.status_code} - {e.response.text}")
             print(f"[VAPI TOOL] Traceback: {traceback.format_exc()}")
             return {
@@ -754,7 +962,7 @@ async def vapi_booking_tool(request: Request):
                 ]
             }
         except Exception as e:
-            error_msg = "I encountered an issue while booking your appointment. Please try again or contact us directly at (805) 327-5758."
+            error_msg = "I encountered an issue while booking your appointment. Please try again or contact us directly at (805) 230-2126."
             print(f"[VAPI TOOL] ❌ Booking failed: {str(e)}")
             print(f"[VAPI TOOL] Error type: {type(e).__name__}")
             print(f"[VAPI TOOL] Traceback: {traceback.format_exc()}")
@@ -783,7 +991,7 @@ async def vapi_booking_tool(request: Request):
         }
         
     except Exception as e:
-        error_msg = "An unexpected error occurred. Please try again or contact us at (805) 327-5758."
+        error_msg = "An unexpected error occurred. Please try again or contact us at (805) 230-2126."
         print(f"[VAPI TOOL] ❌ Unexpected error: {str(e)}")
         print(f"[VAPI TOOL] Traceback: {traceback.format_exc()}")
         tool_call_id = body.get('toolCallId', 'unknown') if 'body' in locals() else 'unknown'
@@ -828,16 +1036,24 @@ def guru_chat(request: VapiChatRequest):
     Receives messages from Vapi and returns RAG responses
     """
     try:
+        # ---- LACS consumer hook (/guru/chat) ----
+        _lacs = lacs_consumer.consult(request.query, "chat")
+        if _lacs is not None:
+            return VapiChatResponse(answer=_lacs["text"])
         # Search for relevant documents
         hits = search_opensearch(request.query, top_k=5)
+        hits = boost_rag_hits(request.query, hits)
 
         if not hits:
             # Even with no hits, provide helpful response about Khanna Institute
-            response = "I don't have enough specific information about that in my knowledge base. However, I can tell you that Khanna Vision Institute, led by Dr. Rajesh Khanna, offers comprehensive vision correction services including LASIK, SMILE laser, EVO ICL, and other advanced procedures. Please contact us directly at (805) 327-5758 or visit our website for more detailed information."
+            response = "I don't have enough specific information about that in my knowledge base. However, I can tell you that Khanna Vision Institute, led by Dr. Rajesh Khanna, offers comprehensive vision correction services including LASIK, SMILE laser, EVO ICL, and other advanced procedures. Please contact us directly at (805) 230-2126 or visit https://khannainstitute.com/contact/schedule-consultation/ for more information."
             model_used = "none"
         else:
             # Generate answer with fallback logic
             response, model_used = generate_answer_with_fallback(request.query, hits)
+
+        response = sanitize_guru_answer(response, request.query)
+        response = sanitize_phone_in_response(response)
 
         # Log the interaction with session ID
         log_interaction(f"[Session: {request.session_id}] {request.query}", response, model_used, len(hits))
@@ -858,6 +1074,25 @@ async def vapi_webhook(request: Request):
     Handles both general Q&A and appointment booking
     """
     try:
+        # ── Security: rate limit by IP ────────────────────────────────────
+        client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
+        client_ip = client_ip.split(",")[0].strip()
+        rate_msg = check_rate_limit(client_ip)
+        if rate_msg:
+            print(f"[SECURITY] Rate limit hit for IP {client_ip}")
+            return JSONResponse(
+                status_code=429,
+                content={"messages": [{"type": "text", "text": rate_msg}]}
+            )
+
+        # ── Security: enforce request size ───────────────────────────────
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > 32_000:
+            return JSONResponse(
+                status_code=413,
+                content={"messages": [{"type": "text", "text": "Message too large."}]}
+            )
+
         # Get request body as JSON
         body = await request.json()
         
@@ -865,7 +1100,7 @@ async def vapi_webhook(request: Request):
         # This is CRITICAL for debugging - log everything Vapi sends
         print(f"\n{'='*80}")
         print(f"[VAPI WEBHOOK] Received request at {datetime.now().isoformat()}")
-        print(f"[VAPI WEBHOOK] Full request body: {json.dumps(body, indent=2)}")
+        print("[VAPI WEBHOOK] request body redacted (remediation 2026-09-15)")
         print(f"[VAPI WEBHOOK] Body type: {type(body)}")
         print(f"[VAPI WEBHOOK] Body keys: {list(body.keys()) if isinstance(body, dict) else 'N/A'}")
         # Check for tool calls in various locations
@@ -1219,17 +1454,20 @@ async def vapi_webhook(request: Request):
         if not message:
             return {"error": "No message found in webhook payload", "received": body}
 
-        # Initialize or get cancel session
-        if session_id not in cancel_sessions:
-            cancel_sessions[session_id] = {
-                'in_cancel_flow': False,
-                'fullName': None,
-                'age': None,
-                'procedure': None,
-                'email': None
-            }
-        cancel_session_data = cancel_sessions[session_id]
-        
+        # ── Security: sanitize and length-limit message ───────────────────
+        message, was_injected = sanitize_input(message)
+        # ---- LACS consumer hook (/vapi/webhook: website text + voice) ----
+        try:
+            import asyncio as _asyncio
+            _lacs = await _asyncio.get_running_loop().run_in_executor(None, lacs_consumer.consult, message, "webhook")
+        except Exception:
+            _lacs = None
+        if _lacs is not None:
+            return {"messages": [{"type": "text", "text": _lacs["text"]}], "active_agent": "lacs",
+                    "lacs": {"documentId": _lacs["documentId"], "version": _lacs["version"], "requiresHumanReview": True}}
+        if was_injected:
+            print(f"[SECURITY] Prompt injection attempt blocked from session {session_id}")
+
         # Initialize or get booking session
         if session_id not in booking_sessions:
             booking_sessions[session_id] = {
@@ -1240,66 +1478,49 @@ async def vapi_webhook(request: Request):
                 'phone': None,
                 'location': None,
                 'date': None,
-                'time': None
+                'time': None,
+                'booking_agent': None,
+                'just_entered': False,
+                'bookings_submitted': 0,  # prevent email spam per session
             }
-        
+
+        # Block sessions that already submitted a booking (max 2 per session)
+        if booking_sessions[session_id].get('bookings_submitted', 0) >= 2:
+            answer = "You've already submitted a booking request. Our team will contact you shortly. For urgent help call (805) 230-2126."
+            return {"messages": [{"type": "text", "text": answer}], "active_agent": "brandi"}
+
         session_data = booking_sessions[session_id]
-        
-        # Check cancel intent FIRST (before booking)
-        is_cancel_intent = detect_cancel_intent(message) or cancel_session_data['in_cancel_flow']
-        
-        # Check if user wants to book or is already in booking flow (but NOT if they want to cancel)
-        is_booking_intent = (not is_cancel_intent) and (detect_booking_intent(message) or session_data['in_booking_flow'])
-        
+
+        # Check if user wants to book or is already in booking flow
+        fresh_booking_intent = detect_booking_intent(message) and not session_data['in_booking_flow']
+        is_booking_intent = fresh_booking_intent or session_data['in_booking_flow']
+
         # Debug logging
-        print(f"[Vapi Webhook] Session: {session_id}, Message: {message}, Cancel: {is_cancel_intent}, Booking: {is_booking_intent}")
-        
-        if is_cancel_intent:
-            # Cancel appointment flow
-            cancel_session_data['in_cancel_flow'] = True
-            if not cancel_session_data.get('fullName'):
-                extracted_name = extract_name(message)
-                if extracted_name:
-                    cancel_session_data['fullName'] = extracted_name
-            if not cancel_session_data.get('age'):
-                extracted_age = extract_age(message)
-                if extracted_age:
-                    cancel_session_data['age'] = extracted_age
-            if not cancel_session_data.get('procedure'):
-                extracted_proc = extract_procedure(message)
-                if extracted_proc:
-                    cancel_session_data['procedure'] = extracted_proc
-            if not cancel_session_data.get('email'):
-                extracted_email = extract_email(message)
-                if extracted_email:
-                    cancel_session_data['email'] = extracted_email
-            required_cancel = ['fullName', 'age', 'procedure', 'email']
-            missing_cancel = [f for f in required_cancel if not cancel_session_data.get(f)]
-            if not missing_cancel:
-                try:
-                    await submit_cancel({
-                        'fullName': cancel_session_data['fullName'],
-                        'age': cancel_session_data['age'],
-                        'procedure': cancel_session_data['procedure'],
-                        'email': cancel_session_data['email']
-                    })
-                    cancel_sessions[session_id] = {'in_cancel_flow': False, 'fullName': None, 'age': None, 'procedure': None, 'email': None}
-                    answer = "I've submitted your appointment cancellation request. Our team will process it shortly and you'll receive a confirmation. Is there anything else I can help you with?"
-                    model_used = "cancel_submitted"
-                except Exception as e:
-                    answer = f"I encountered an issue submitting your cancellation. Please call us directly at (310) 482-1240 or (805) 230-2126. Error: {str(e)}"
-                    model_used = "cancel_error"
-            else:
-                next_q = get_next_cancel_question(cancel_session_data)
-                answer = next_q or "I need a bit more information to process your cancellation."
-                model_used = "cancel_collection"
-            log_interaction(f"[Vapi Cancel Session: {session_id}] {message}", answer, model_used, 0)
-        elif is_booking_intent:
+        print(f"[Vapi Webhook] Session: {session_id}, Message: {message}, Booking Intent: {is_booking_intent}, In Flow: {session_data['in_booking_flow']}")
+
+        if is_booking_intent:
             # Enter or continue booking flow
-            session_data['in_booking_flow'] = True
-            
+            if fresh_booking_intent:
+                session_data['in_booking_flow'] = True
+                session_data['just_entered'] = True
+                # Capture which agent is currently active so we can include it in the email
+                if session_id in ecosystem_sessions:
+                    active = ecosystem_sessions[session_id].get("active_agent", "brandi")
+                    _agent_labels = {
+                        "brandi": "Brandi", "guru": "Guru", "max": "Max",
+                        "lucy": "Lucy", "rose": "Rose", "kate": "Kate",
+                        "sage": "Sage", "buffet": "Buffett", "barbie": "Barbie", "jill": "Jill",
+                    }
+                    session_data['booking_agent'] = _agent_labels.get(active, "Guru AI")
+                else:
+                    session_data['booking_agent'] = "Guru AI"
+            else:
+                session_data['just_entered'] = False
+
             # Extract information from current message
-            if not session_data.get('fullName'):
+            # Skip name extraction on the very first trigger message (e.g. "please book an appointment")
+            # so we ask for the name fresh rather than accidentally capturing the intent phrase
+            if not session_data.get('fullName') and not session_data.get('just_entered'):
                 extracted_name = extract_name(message)
                 if extracted_name:
                     session_data['fullName'] = extracted_name
@@ -1341,6 +1562,7 @@ async def vapi_webhook(request: Request):
             if not missing_fields:
                 # All information collected - submit booking
                 try:
+                    booking_agent_label = session_data.get('booking_agent') or 'Guru AI'
                     booking_result = await submit_booking({
                         'fullName': session_data['fullName'],
                         'age': session_data['age'],
@@ -1348,10 +1570,12 @@ async def vapi_webhook(request: Request):
                         'phone': session_data['phone'],
                         'location': session_data['location'],
                         'date': session_data['date'],
-                        'time': session_data['time']
+                        'time': session_data['time'],
+                        'pageUrl': f'Chat Widget — {booking_agent_label} Agent',
                     })
                     
-                    # Clear booking session
+                    # Clear booking session but keep submission count
+                    submitted_count = booking_sessions[session_id].get('bookings_submitted', 0) + 1
                     booking_sessions[session_id] = {
                         'in_booking_flow': False,
                         'fullName': None,
@@ -1360,14 +1584,23 @@ async def vapi_webhook(request: Request):
                         'phone': None,
                         'location': None,
                         'date': None,
-                        'time': None
+                        'time': None,
+                        'booking_agent': None,
+                        'just_entered': False,
+                        'bookings_submitted': submitted_count,
                     }
                     
-                    answer = f"Perfect! I've scheduled your consultation for {session_data['date']} at {session_data['time']} at our {session_data['location']} location. You'll receive a confirmation email at {session_data['email']} shortly. Is there anything else I can help you with?"
+                    loc_display = "Beverly Hills" if session_data['location'] == 'beverly' else "Westlake Village"
+                    answer = (
+                        f"Perfect! I've scheduled your consultation for {session_data['date']} at "
+                        f"{session_data['time']} at our {loc_display} location. "
+                        f"You'll receive a confirmation email at {session_data['email']} shortly. "
+                        f"Is there anything else I can help you with?"
+                    )
                     model_used = "booking_submitted"
                     
                 except Exception as e:
-                    answer = f"I encountered an issue submitting your booking. Please try again or call us directly at (805) 327-5758. Error: {str(e)}"
+                    answer = f"I encountered an issue submitting your booking. Please try again or call us directly at (805) 230-2126. Error: {str(e)}"
                     model_used = "booking_error"
             else:
                 # Ask for next missing piece of information
@@ -1379,38 +1612,90 @@ async def vapi_webhook(request: Request):
             log_interaction(f"[Vapi Booking Session: {session_id}] {message}", answer, model_used, 0)
             
         else:
-            # Regular Q&A flow
-            # First, try to match against FAQ knowledge base
-            faq_result = match_faq(message, threshold=0.5)
-            
-            if faq_result:
-                answer, confidence = faq_result
-                model_used = f"faq_match_{confidence:.2f}"
-                print(f"[FAQ MATCH] Confidence: {confidence:.2f} - Using FAQ answer")
-                hits = []
+            # Regular Q&A flow — single Guru (legacy) or KVI multi-agent ecosystem
+            mv = (os.getenv("KVI_MULTI_AGENT") or "1").strip().lower()
+            use_multi = mv not in ("0", "false", "no", "off")
+
+            if use_multi:
+                if session_id not in ecosystem_sessions:
+                    ecosystem_sessions[session_id] = init_eco_session()
+                eco = ecosystem_sessions[session_id]
+                early_reply, active_agent = eco_turn(eco, message)
+                print(f"[VAPI WEBHOOK] multi-agent active_agent={active_agent} early_reply={'yes' if early_reply else 'no'}")
+
+                if early_reply:
+                    answer = early_reply
+                    model_used = active_agent if active_agent in ("brandi", "jill") else "routing"
+                    hits_for_log: List[Dict[str, Any]] = []
+                else:
+                    hits = search_opensearch(message, top_k=5)
+                    hits = boost_rag_hits(message, hits)
+
+                    pricing_keywords = ['cost', 'price', 'pricing', 'how much', 'fee', 'charge', 'exam cost', 'consultation cost']
+                    contact_keywords = ['phone number', 'phone', 'contact number', 'call us', 'our number', 'address', 'westlake', 'location', 'reach us']
+                    if any(kw in message.lower() for kw in pricing_keywords) or any(kw in message.lower() for kw in contact_keywords):
+                        hits = [{"text": PRICING_FACTS}] + (hits or [])
+
+                    if not hits:
+                        answer = (
+                            "I don't have enough specific information about that in my knowledge base. However, I can tell you that "
+                            "Khanna Vision Institute, led by Dr. Rajesh Khanna, offers comprehensive vision correction services including LASIK, "
+                            "SMILE laser, EVO ICL, and other advanced procedures. Please contact us directly at (805) 230-2126 or visit "
+                            "https://khannainstitute.com/contact/schedule-consultation/ for more information."
+                        )
+                        model_used = "none"
+                    else:
+                        answer, model_used = generate_answer_for_agent(active_agent, message, hits)
+
+                    hits_for_log = hits
             else:
-                # Process through RAG pipeline
                 hits = search_opensearch(message, top_k=5)
+                hits = boost_rag_hits(message, hits)
+
+                pricing_keywords = ['cost', 'price', 'pricing', 'how much', 'fee', 'charge', 'exam cost', 'consultation cost']
+                contact_keywords = ['phone number', 'phone', 'contact number', 'call us', 'our number', 'address', 'westlake', 'location', 'reach us']
+                if any(kw in message.lower() for kw in pricing_keywords) or any(kw in message.lower() for kw in contact_keywords):
+                    hits = [{"text": PRICING_FACTS}] + (hits or [])
 
                 if not hits:
-                    # Even with no hits, provide helpful response about Khanna Institute
-                    answer = "I don't have enough specific information about that in my knowledge base. However, I can tell you that Khanna Vision Institute, led by Dr. Rajesh Khanna, offers comprehensive vision correction services including LASIK, SMILE laser, EVO ICL, and other advanced procedures. Please contact us directly at (805) 327-5758 or visit our website for more detailed information."
+                    answer = (
+                        "I don't have enough specific information about that in my knowledge base. However, I can tell you that "
+                        "Khanna Vision Institute, led by Dr. Rajesh Khanna, offers comprehensive vision correction services including LASIK, "
+                        "SMILE laser, EVO ICL, and other advanced procedures. Please contact us directly at (805) 230-2126 or visit "
+                        "https://khannainstitute.com/contact/schedule-consultation/ for more information."
+                    )
                     model_used = "none"
                 else:
                     answer, model_used = generate_answer_with_fallback(message, hits)
 
-            # Log the interaction
-            log_interaction(f"[Vapi Session: {session_id}] {message}", answer, model_used, len(hits))
+                hits_for_log = hits
+
+            # Sanitize: enforce Dr. Khanna years; never return wrong phone numbers
+            answer = sanitize_guru_answer(answer, message)
+            answer = sanitize_phone_in_response(answer)
+
+            log_interaction(
+                f"[Vapi Session: {session_id}] {message}",
+                answer,
+                model_used,
+                len(hits_for_log),
+            )
 
         # Return in Vapi-expected format
-        # For assistant-request events, Vapi expects this format
+        # Determine which agent is currently active (for widget UI switching)
+        if session_id in ecosystem_sessions:
+            current_agent = ecosystem_sessions[session_id].get("active_agent", "brandi")
+        else:
+            current_agent = "guru"
+
         response = {
             "messages": [
                 {
                     "type": "text",
                     "text": answer
                 }
-            ]
+            ],
+            "active_agent": current_agent
         }
         
         # If this is an assistant-request event, include toolCallId if present
@@ -1418,7 +1703,7 @@ async def vapi_webhook(request: Request):
             response['toolCallId'] = body['toolCallId']
         
         # DEBUG: Log response
-        print(f"[VAPI WEBHOOK] Sending response: {json.dumps(response, indent=2)}")
+        print(f"[VAPI WEBHOOK] active_agent={current_agent} | Sending response: {json.dumps(response, indent=2)}")
         
         return response
 
