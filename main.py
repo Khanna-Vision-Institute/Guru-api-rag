@@ -72,8 +72,10 @@ import lacs_consumer  # LACS approved-Q&A consumer (remediation 2026-09-15)
 app = FastAPI(title="Guru AI RAG API", version="1.0.0", description="Medical AI assistant with RAG capabilities")
 
 # Separate, authenticated transport for staff VAPI acceptance. Disabled by default.
-from lacs_voice_preview import LacsVoicePreview
+from lacs_voice_preview import LacsVoicePreview, LacsVoicePublic
+from lacs_public_webhook import public_webhook
 app.mount("/vapi/lacs-preview", LacsVoicePreview())
+app.mount("/vapi/lacs-public", LacsVoicePublic())
 
 # Deduplication: Track processed tool calls to prevent duplicate bookings
 processed_tool_calls = set()
@@ -128,7 +130,10 @@ async def guru_access_control(request: Request, call_next):
             print(f"[ACCESS] tool call without valid x-vapi-secret on {path} (enforce={_GURU_ENFORCE_TOOL_SECRET})")
             if _GURU_ENFORCE_TOOL_SECRET:
                 return _ACJSONResponse({"detail": "Unauthorized"}, status_code=401)
-    return await call_next(request)
+    response = await call_next(request)
+    if lacs_consumer.public_mode() and path in ("/ask", "/guru/chat", "/vapi/webhook"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 # ---- end Guru access control ----
 
 
@@ -1085,6 +1090,9 @@ async def vapi_webhook(request: Request):
     Receives webhook calls from Vapi and processes them
     Handles both general Q&A and appointment booking
     """
+    if lacs_consumer.public_mode():
+        # Intercept before legacy logging, tool dispatch, booking or agent prompts.
+        return JSONResponse(content=await public_webhook(request, rate_limit=check_rate_limit), headers={"Cache-Control": "no-store"})
     try:
         # ── Security: rate limit by IP ────────────────────────────────────
         client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")

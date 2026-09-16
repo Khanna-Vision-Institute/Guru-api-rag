@@ -1,6 +1,7 @@
 """Server-only LACS client. Local exact matching; no visitor text leaves this process.
 
-Returns a reviewed suggestion, never authority for autonomous patient delivery.
+Staff suggestions require review. The separate public contract permits exact
+clinician-approved educational wording only; no personalized clinical decisions.
 Uses a deployment-supplied short-lived token provider; never browser credentials.
 """
 import hashlib
@@ -12,6 +13,8 @@ import urllib.parse
 import urllib.request
 
 SCHEMA = "lacs-approved-qa-v1"
+PUBLIC_SCHEMA = "lacs-public-approved-qa-v1"
+PUBLIC_POLICY = "approved-public-education-exact-v1"
 COVERAGE_SCHEMA = "lacs-approved-qa-coverage-v1"
 ID = re.compile(r"clinical-qa:[a-f0-9]{64}\Z")
 HASH = re.compile(r"[a-f0-9]{64}\Z")
@@ -85,7 +88,7 @@ class ApprovedQaClient:
                 if len(raw) > 524288 or time.monotonic() > deadline:
                     raise Unavailable("LACS response limit exceeded")
                 value = json.loads(raw)
-                if not isinstance(value, dict) or value.get("schemaVersion") != schema or value.get("requiresHumanReview") is not True:
+                if not isinstance(value, dict) or value.get("schemaVersion") != schema or value.get("requiresHumanReview") is not (schema != PUBLIC_SCHEMA):
                     raise Unavailable("Invalid LACS contract")
                 return value
         except Exception:
@@ -107,12 +110,13 @@ class ApprovedQaClient:
             raise Unavailable("Invalid coverage revision")
         return value
 
-    def suggest(self, question):
+    def suggest(self, question, *, public_delivery=False):
         """Return exact approved suggestion or None. Fetch fresh on every invocation.
 
-        The caller must retain human review and its own urgent-symptom escalation.
-        Do not put output into an LLM prompt as instruction, publish it automatically,
-        or cache the answer for later delivery.
+        Staff output retains human review. Public output requires the separate
+        authenticated public-resolution contract; never reinterpret a staff result.
+        Do not rewrite output with a model or cache it for later delivery. Only
+        the public contract permits verbatim delivery without per-response review.
         """
         if not isinstance(question, str) or not question.strip() or len(question) > 500:
             raise Unavailable("Invalid local question")
@@ -156,9 +160,12 @@ class ApprovedQaClient:
             raise Unavailable("Ambiguous approved knowledge")
         selected = matches[0]
         ref = _reference(selected)
-        result = self._request("/v1/knowledge/approved-qa/resolve", ref, deadline)
-        if (result.get("schemaVersion") != SCHEMA or result.get("requiresHumanReview") is not True
-                or set(result) != {"schemaVersion", "requiresHumanReview", "documentId", "version", "integrityHash", "question", "answer", "supportingUrls"}
+        schema = PUBLIC_SCHEMA if public_delivery else SCHEMA
+        path = "/v1/knowledge/approved-qa/" + ("public-resolve" if public_delivery else "resolve")
+        result = self._request(path, ref, deadline, schema=schema)
+        if (result.get("schemaVersion") != schema or result.get("requiresHumanReview") is not (not public_delivery)
+                or (public_delivery and result.get("deliveryPolicy") != PUBLIC_POLICY)
+                or set(result) != ({"schemaVersion", "requiresHumanReview", "documentId", "version", "integrityHash", "question", "answer", "supportingUrls"} | ({"deliveryPolicy"} if public_delivery else set()))
                 or _reference(result) != ref or result["question"] != selected["question"]
                 or not isinstance(result["answer"], str) or not 1 <= len(result["answer"]) <= 4000
                 or not isinstance(result["supportingUrls"], list) or len(result["supportingUrls"]) > 20

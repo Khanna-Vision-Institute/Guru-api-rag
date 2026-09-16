@@ -17,6 +17,16 @@ documents every variable. To change a value: update the secret, then `sudo syste
 `/vapi/tool/*` requires `x-vapi-secret` (set on the Vapi assistant and the bookAppointment tool). Public chat
 (`/vapi/webhook`, `/guru/chat`, `/tts`, `/health`) stays open for the website widget.
 
+## Approved public connection
+
+Raj authorized live delivery of his final approved public educational answers on
+2026-09-16. See [the public cutover runbook](docs/LACS-PUBLIC-DELIVERY.md).
+`LACS_CONSUMER_DELIVERY=approved-public` selects this separate contract. It returns
+fresh exact approved wording or a staff handoff, with no legacy answer fallback.
+Guru text and all configured Vapi personas use this same source. Defaults remain
+unchanged until the server operator performs the release and Vapi configuration.
+The historical shadow/staff behavior below remains available for staff tests.
+
 ## LACS approved-Q&A consumer
 
 The website's stored VAPI assistants need a separate model connection; they do not
@@ -37,6 +47,7 @@ The master switch defaults to disabled, and delivery defaults to shadow.
 | Disabled, or delivery `off` | No LACS request, including staff requests; existing Guru path remains unchanged. |
 | Enabled + `shadow`, public request | Consult LACS, log only channel/outcome, return a SHADOW decision without approved content; existing Guru path remains unchanged. |
 | Enabled + `shadow`, admin `/ask` request | Staff can review an exact approved match. A completed no-match lookup uses the existing path; a verification failure returns a human-review handoff. |
+| Enabled + `approved-public` | Fresh public-resolve contract; exact approved wording or handoff. No legacy model, booking webhook dispatch or answer fallback. |
 | Enabled + `live`, or any unknown delivery value | BLOCKED without contacting LACS or invoking legacy Q&A. Live delivery has not been authorized. |
 
 In staff review, MATCH returns the exact freshly resolved approved wording without LLM rewriting.
