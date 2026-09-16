@@ -20,6 +20,58 @@ documents every variable. To change a value: update the secret, then `sudo syste
 ## LACS approved-Q&A consumer
 
 `lacs_consumer.py` consults LACS (`/v1/knowledge/approved-qa`) with a dedicated OIDC service identity before the
-FAQ/OpenSearch/LLM path, per `docs/operations/APPROVED-QA-CONSUMERS.md` in KVI-LACS-Core. `LACS_CONSUMER_DELIVERY`
-is `shadow` (matches audited, visitor answers unchanged) until switched to `live`; staff requests with the admin key
-always receive the approved answer.
+FAQ/OpenSearch/LLM path, per `docs/operations/APPROVED-QA-CONSUMERS.md` in KVI-LACS-Core.
+
+**This implementation is a shadow/staff-review integration, not authorized patient delivery.**
+No deployment or environment change is required or performed by this patch. Keep the existing shadow setting.
+The master switch defaults to disabled, and delivery defaults to shadow.
+
+| Configuration | Behavior |
+| --- | --- |
+| Disabled, or delivery `off` | No LACS request, including staff requests; existing Guru path remains unchanged. |
+| Enabled + `shadow`, public request | Consult LACS, log only channel/outcome, return a SHADOW decision without approved content; existing Guru path remains unchanged. |
+| Enabled + `shadow`, admin `/ask` request | Staff can review an exact approved match. A completed no-match lookup uses the existing path; a verification failure returns a human-review handoff. |
+| Enabled + `live`, or any unknown delivery value | BLOCKED without contacting LACS or invoking legacy Q&A. Live delivery has not been authorized. |
+
+In staff review, MATCH returns the exact freshly resolved approved wording without LLM rewriting.
+NO_MATCH means a successful complete catalog lookup found no exact match; it is not a network-error flag.
+Ambiguity, invalid input, exhausted pagination, authentication failures, outages, deadlines, and rejected
+fresh resolution (including a retired/changed version) are BLOCKED. All three Q&A entry points
+(`/ask`, `/guru/chat`, `/vapi/webhook`) use the explicit decision. Unexpected consumer exceptions also block.
+Public SHADOW mode deliberately preserves legacy answers even when the observed LACS result is BLOCKED;
+this behavior is for testing only and is not the final clinical fallback policy.
+
+Matching is local, exact after case/whitespace/question-mark normalization, not keyword or semantic matching.
+The consumer sends only opaque references to LACS, not visitor questions. LACS requests are fresh, bounded,
+and use a no-proxy/no-redirect client. At most two lookups can be outstanding, including timed-out workers;
+requests do not build up an unbounded executor queue. Token responses are bounded and short-lived.
+Consumer logs contain only fixed channel/outcome classes. This does not certify the privacy of pre-existing
+Guru logging elsewhere in the application.
+
+### Remaining gates before patient-facing LACS-first fallback
+
+1. Add a retirement-aware coverage/suppression contract. The v1 feed lists only currently approved records:
+   an answer withdrawn **before** catalog retrieval is indistinguishable from a question never covered.
+   Blocking a failed fresh resolve catches withdrawal **after** catalog retrieval, not that earlier case.
+   For this reason this patch explicitly refuses live mode; merely setting an environment variable is insufficient.
+2. Reconcile the current live Guru FAQ/OpenSearch corpus with approved LACS coverage, including conflicting,
+   retired and duplicate answers. Obtain a questions-and-answers-only export, not conversations, credentials,
+   patient records or an unrestricted index dump. The repository FAQ file is not evidence of the full live corpus.
+3. Validate the dedicated service identity and version/retirement behavior in staging with synthetic questions,
+   then approve patient-delivery rules, emergency escalation, monitoring and rollback separately.
+   The LACS v1 contract still requires human review. Broader paraphrase/keyword matching also needs review.
+4. Review/merge the underlying remediation PR and this focused follow-up in order. Do not auto-merge or deploy
+   this follow-up, and do not activate live delivery during testing.
+
+### Offline regression checks
+
+Run only the isolated standard-library suite; older root test scripts can call external services.
+
+```sh
+python3 -B -m unittest discover -s tests/lacs -p 'test_*.py' -v
+python3 -m py_compile lacs_approved_qa.py lacs_consumer.py main.py
+```
+
+Fixtures are synthetic. Handler tests compile only the real handler functions with stubbed dependencies,
+avoiding main.py module-level service initialization. They verify the routing gates, not HTTP middleware,
+the actual deployed server, authentication setup, website behavior, voice-provider fallback, or clinical accuracy.

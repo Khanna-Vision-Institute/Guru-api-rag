@@ -525,9 +525,14 @@ def ask_guru(request: AskRequest, http_request: Request):
     """
     try:
         # ---- LACS consumer hook (/ask) ----
-        _lacs = lacs_consumer.consult(request.query, "ask", privileged=lacs_consumer.is_admin(http_request))
-        if _lacs is not None:
-            return AskResponse(answer=_lacs["text"], model_used="lacs-approved-qa", hits=[], timestamp=datetime.now().isoformat())
+        try:
+            _lacs = lacs_consumer.consult(request.query, "ask", privileged=lacs_consumer.is_admin(http_request))
+        except Exception:
+            _lacs = lacs_consumer.blocked_decision()
+        if not _lacs.allow_legacy:
+            return AskResponse(answer=_lacs.text,
+                               model_used="lacs-approved-qa" if _lacs.outcome == "MATCH" else "lacs-human-review",
+                               hits=[], timestamp=datetime.now().isoformat())
         # Search for relevant documents
         hits = search_opensearch(request.query, request.top_k)
         hits = boost_rag_hits(request.query, hits)
@@ -1037,9 +1042,12 @@ def guru_chat(request: VapiChatRequest):
     """
     try:
         # ---- LACS consumer hook (/guru/chat) ----
-        _lacs = lacs_consumer.consult(request.query, "chat")
-        if _lacs is not None:
-            return VapiChatResponse(answer=_lacs["text"])
+        try:
+            _lacs = lacs_consumer.consult(request.query, "chat")
+        except Exception:
+            _lacs = lacs_consumer.blocked_decision()
+        if not _lacs.allow_legacy:
+            return VapiChatResponse(answer=_lacs.text)
         # Search for relevant documents
         hits = search_opensearch(request.query, top_k=5)
         hits = boost_rag_hits(request.query, hits)
@@ -1458,13 +1466,16 @@ async def vapi_webhook(request: Request):
         message, was_injected = sanitize_input(message)
         # ---- LACS consumer hook (/vapi/webhook: website text + voice) ----
         try:
-            import asyncio as _asyncio
-            _lacs = await _asyncio.get_running_loop().run_in_executor(None, lacs_consumer.consult, message, "webhook")
+            _lacs = await lacs_consumer.consult_async(message, "webhook")
         except Exception:
-            _lacs = None
-        if _lacs is not None:
-            return {"messages": [{"type": "text", "text": _lacs["text"]}], "active_agent": "lacs",
-                    "lacs": {"documentId": _lacs["documentId"], "version": _lacs["version"], "requiresHumanReview": True}}
+            _lacs = lacs_consumer.blocked_decision()
+        if not _lacs.allow_legacy:
+            metadata = {"outcome": _lacs.outcome, "requiresHumanReview": True}
+            if _lacs.suggestion:
+                metadata.update({key: _lacs.suggestion[key]
+                                 for key in ("documentId", "version", "integrityHash", "supportingUrls")})
+            return {"messages": [{"type": "text", "text": _lacs.text}], "active_agent": "lacs",
+                    "lacs": metadata}
         if was_injected:
             print(f"[SECURITY] Prompt injection attempt blocked from session {session_id}")
 
