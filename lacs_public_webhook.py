@@ -68,4 +68,8 @@ async def public_webhook(request, *, rate_limit=None):
     if decision.outcome == "MATCH":
         metadata.update({key: decision.suggestion[key] for key in
                          ("documentId", "version", "integrityHash", "supportingUrls", "deliveryPolicy")})
-    return {"messages": [{"type": "text", "text": decision.text}], "active_agent": "lacs", "lacs": metadata}
+    # Do not return active_agent="lacs": the website would replace its selected
+    # persona with an unknown key and lose the mapped Vapi assistant ID.
+    return {"messages": [{"type": "text", "text": decision.text}],
+            "model_used": "lacs-approved-qa" if decision.outcome == "MATCH" else "lacs-human-review",
+            "lacs": metadata}

@@ -27,7 +27,9 @@ not semantic conversational retrieval and does not diagnose, infer candidacy or
 provide personalized advice. Guru's reported 270-answer corpus still needs a
 Q&A-only export/reconciliation before any legacy fallback can be added safely.
 
-The website's existing text request shape is supported directly. The public
+The website's existing text request shape is supported directly. Responses preserve
+the selected website persona and its Vapi assistant mapping; LACS is reported as
+the answer source, never as an unknown active-agent key. The public
 webhook intercepts before legacy transcript logging, agent prompts and booking
 branches. Consequently **booking through this chat lane also hands off to staff**;
 the separate authenticated booking tool endpoints are unchanged. No booking,
